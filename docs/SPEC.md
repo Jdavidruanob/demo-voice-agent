@@ -1,0 +1,215 @@
+# Spec del producto
+
+Spec en el sentido de "spec-driven development": la referencia que describe
+**qué debe hacer el sistema y bajo qué condiciones se considera correcto**,
+independiente de cómo esté implementado hoy. Cuando el código y este
+documento no coincidan, uno de los dos está desactualizado — corrígelo antes
+de seguir construyendo encima. Ver `docs/ARQUITECTURA.md` para el cómo.
+
+## 1. Objetivo
+
+Un agente de voz en español que le muestre a un comprador potencial (dueño de
+restaurante) que un bot puede tomar un pedido por teléfono **de forma fluida
+y natural**, sin sonar robótico ni tener pausas incómodas. La fluidez es la
+métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
+
+## 2. Alcance de esta fase (demo comercial)
+
+**Dentro de alcance:**
+- Tomar un pedido de un menú fijo y pequeño (4 productos).
+- Permitir que el cliente se corrija a mitad de pedido.
+- Confirmar y persistir el pedido.
+- Sonar fluido: sin silencios muertos, sin cortes de turno torpes, primera
+  respuesta instantánea.
+
+**Fuera de alcance (explícito, no es un olvido):**
+- Múltiples sedes/sucursales.
+- Reservas de mesa.
+- Direcciones de entrega o estados de cocina (`en preparación`, `en camino`).
+- Pagos.
+- Portal/dashboard para el restaurante (se discutió arquitectura — Postgres
+  compartida entre agente y portal — pero no se construyó).
+- Conexión a un número de teléfono real (troncal SIP, portabilidad).
+  Discutido a fondo (ver hilo de decisiones más abajo) pero no iniciado.
+- Multi-idioma. Solo español.
+
+## 3. Requisitos funcionales
+
+Expresados como comportamiento observable, no como implementación.
+
+**RF-1 — Saludo inmediato.** Al iniciar la sesión, el agente saluda sin que
+el cliente tenga que hablar primero, y sin una pausa perceptible de roundtrip
+de LLM.
+
+**RF-2 — Consulta de menú sin fricción.** Preguntas generales o por
+categoría ("¿qué bebidas tienen?", "¿qué combos manejan?") se responden en el
+mismo turno, sin necesidad de que el sistema "vaya a buscar" nada.
+
+**RF-3 — Identificación de producto específico.** Si el cliente nombra o
+describe un producto puntual —incluso con errores de transcripción de voz o
+sinónimos coloquiales— el sistema identifica el producto correcto o, si hay
+ambigüedad real, pregunta cuál en vez de asumir.
+
+**RF-4 — Construcción incremental del pedido.** El cliente puede ir
+agregando productos uno a uno a lo largo de la conversación.
+
+**RF-5 — Corrección del pedido.** El cliente puede cambiar de opinión en
+cualquier momento antes de confirmar: quitar un producto, cambiar una
+cantidad, o cancelar el pedido completo y empezar de nuevo. Ninguna de estas
+acciones debe fallar, trabarse, ni hacer que el agente mienta sobre el estado
+del pedido.
+
+**RF-6 — Confirmación explícita.** El pedido solo se considera final cuando
+el cliente lo confirma de forma explícita después de que el agente repite
+productos y cantidades. Nunca se persiste antes de esa confirmación.
+
+**RF-7 — Rechazo de lo inexistente.** Si el cliente pide algo que no está en
+el menú o una cantidad que excede el stock disponible, el sistema lo dice con
+naturalidad, sin inventar disponibilidad ni productos.
+
+**RF-8 — Persistencia con integridad.** Al confirmar, el pedido se guarda de
+forma atómica (todo o nada), con el total correcto, y el stock se descuenta
+de forma consistente incluso si dos llamadas confirman al mismo tiempo sobre
+el mismo producto.
+
+## 4. Requisitos no funcionales
+
+**RNF-1 — Fluidez (prioridad máxima de esta fase).** El tiempo entre que el
+cliente termina de hablar y el agente empieza a responder (`e2e_latency`,
+ver `docs/ARQUITECTURA.md` § Observabilidad) debe mantenerse bajo, y ningún
+paso intermedio (consultar el menú, buscar un producto) debe introducir un
+silencio perceptible sin que el agente diga algo mientras tanto.
+
+**RNF-2 — Voz fija.** La voz (`aura-2` / `celeste` / `es-CO`) es una decisión
+de producto ya tomada y aprobada. Ningún cambio futuro debe alterarla salvo
+instrucción explícita y nueva del dueño del producto.
+
+**RNF-3 — Idioma.** Toda interacción con el cliente, incluyendo mensajes de
+error de las tools que el LLM pueda verbalizar, debe estar en español. (Esto
+descarta dejar que una excepción sin capturar llegue al LLM: el mensaje
+genérico de error de LiveKit Agents está en inglés — ver
+`docs/ARQUITECTURA.md` § Manejo de errores.)
+
+**RNF-4 — Aislamiento entre llamadas.** El estado de un pedido de una llamada
+nunca debe ser visible ni modificable desde otra llamada concurrente en el
+mismo proceso.
+
+**RNF-5 — Configurabilidad para decidir con datos.** STT y LLM deben poder
+cambiarse por variable de entorno, para comparar alternativas sin editar
+código (ver `scripts/bench_llm.py`). El TTS es la excepción intencional
+(RNF-2).
+
+## 5. Contrato de las tools
+
+Formato: nombre — precondición — postcondición — modo de fallo.
+
+**`search_products(query: str)`**
+- Precondición: ninguna.
+- Postcondición: devuelve `{"found": bool, "products": [...]}` con hasta 5
+  coincidencias ordenadas por similitud.
+- Fallo: nunca lanza excepción; `found=False` si no hay coincidencias.
+
+**`add_item_to_order(product_id: int, quantity: int)`**
+- Precondición: el producto debe existir y tener stock suficiente contando
+  lo que ya llevaba pedido ese mismo producto.
+- Postcondición: el item se agrega (o se suma a la cantidad existente si el
+  producto ya estaba en el pedido); devuelve el pedido completo y el total
+  corriente.
+- Fallo: `{"success": False, "message": "..."}` en español si el producto no
+  existe o no hay stock — nunca una excepción.
+
+**`set_item_quantity(product_id: int, quantity: int)`**
+- Precondición: `quantity >= 0`. Si `quantity > 0` y el producto no estaba en
+  el pedido, se comporta como agregarlo (mismas validaciones de stock).
+- Postcondición: la cantidad de ese producto en el pedido queda exactamente
+  en `quantity`; `quantity=0` lo elimina del pedido.
+- Fallo: mensaje en español si `quantity < 0`, si el producto no existe, o si
+  no hay stock suficiente.
+
+**`vaciar_pedido()`**
+- Precondición: ninguna.
+- Postcondición: el pedido en curso queda vacío. No toca la base de datos.
+- Fallo: no aplica.
+
+**`confirm_order()`**
+- Precondición: el pedido en curso tiene al menos un item.
+- Postcondición: se crea una fila en `orders` (con `total` y
+  `customer_phone` si existe) y una fila por item en `order_items` (con
+  `unit_price` congelado); el stock de cada producto queda descontado; el
+  pedido en curso se vacía.
+- Fallo: `{"success": False, ...}` si el pedido está vacío. `ToolError` (en
+  español) si, al revalidar dentro de la transacción, el stock ya no alcanza
+  — caso de carrera con otra llamada concurrente.
+
+## 6. Modelo de datos (invariantes)
+
+- `order_items.unit_price` es el precio en el momento del pedido, no una
+  referencia al precio actual de `products` — un pedido confirmado no cambia
+  de valor si el restaurante ajusta precios después.
+- `orders.total` siempre es igual a `sum(order_items.quantity * order_items.unit_price)`
+  para ese pedido. Se calcula en Python al confirmar, no se recalcula después.
+- El stock de un producto nunca debe quedar negativo. Se protege con
+  `SELECT ... FOR UPDATE` dentro de la transacción de `confirm_order`.
+
+## 7. Criterios de aceptación (escenarios de prueba)
+
+Guion mínimo que cualquier cambio a `agent.py` o `tools/` debe seguir
+pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
+
+1. Preguntar *"¿qué tienen para tomar?"* → responde sin invocar ninguna tool.
+2. Pedir *"un combo familiar y una gaseosa"* → dos items en el pedido, con
+   precio y total correctos.
+3. Pedir *"un polo asado"* (con error de transcripción) → identifica Pollo
+   Asado vía `search_products`.
+4. Decir *"ay no, quíteme la gaseosa"* → el item se quita; el agente no
+   miente ni se traba. **(Este escenario era el bug #1 antes de esta rama.)**
+5. Preguntar *"¿cuánto es el total?"* → cifra exacta, calculada, nunca
+   estimada de cabeza por el LLM.
+6. Pedir una cantidad mayor al stock disponible → rechazo con mensaje
+   natural, sin excepción ni silencio.
+7. Pedir un producto inexistente (ej. "una hamburguesa") → lo dice con
+   naturalidad, sin inventar.
+8. Confirmar el pedido → se guarda en `orders`/`order_items`, el stock se
+   descuenta, y una segunda consulta a la base refleja exactamente lo
+   pedido.
+
+La suite automática usada para verificar 4, 6, 7 y 8 contra Postgres real
+(sin voz) vive fuera del repo, en el scratchpad de la sesión que hizo el
+cambio; no está commiteada porque depende de un stub de `RunContext` pensado
+para debug puntual, no para CI. Si se necesita una suite de regresión real,
+es trabajo pendiente (ver § 9).
+
+## 8. Decisiones de producto ya tomadas (no reabrir sin pedirlo explícitamente)
+
+- La voz no se cambia (RNF-2).
+- El menú vive en el prompt, no en una tool — mientras siga siendo un menú
+  pequeño y estable dentro de una misma llamada.
+- `gpt-4.1-mini` sigue siendo el LLM por defecto aunque el benchmark mostró
+  candidatos más rápidos; cambiarlo es una decisión pendiente de quien
+  compare calidad de respuesta, no solo latencia.
+- Ningún dato de reservas, direcciones ni estados de cocina se agrega a
+  propósito en esta fase — mantiene el alcance chico y la demo enfocada.
+
+## 9. Fuera de alcance, pero ya discutido — próximos pasos si se retoma
+
+Estos temas se conversaron en profundidad antes de este spec, y las
+decisiones/hallazgos quedan resumidos aquí para no tener que re-investigarlos:
+
+- **Telefonía real (Colombia).** Requiere un trunk SIP (Claro/Movistar/Tigo
+  ya ofrecen troncal SIP empresarial con NIT) o portar el número a un
+  proveedor SIP. `LiveKit Phone Numbers` (números propios de LiveKit) es
+  US-only e inbound-only — no sirve para Colombia. Antes de prometerle esto
+  a un cliente, hay que confirmar: tipo de número (móvil vs. fijo),
+  contrato (persona natural vs. empresarial con NIT), si es el mismo número
+  de WhatsApp Business (no portarlo sin verificar primero), y cuántas
+  llamadas simultáneas necesita atender — un celular normal solo atiende una
+  a la vez, lo cual anula buena parte del valor del agente en hora pico.
+- **Aviso legal / Ley 1581 de 2012.** Ya existe el flag `AVISO_LEGAL` para
+  activar el aviso de asistente virtual/grabación en el saludo; falta
+  confirmar con un abogado si además se requiere registro ante la SIC.
+- **Portal de pedidos.** La arquitectura ya soporta esto sin cambios: el
+  portal sería otro cliente leyendo la misma Postgres (o Supabase, si se
+  migra por realtime/dashboard gratis). No se requiere una API intermedia.
+- **Captura del número del cliente.** Ya implementada de forma no bloqueante
+  (`agent.py:_capturar_telefono_sip`); solo falta que exista una llamada SIP
+  real para ejercitarla.

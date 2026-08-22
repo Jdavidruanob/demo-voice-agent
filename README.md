@@ -4,6 +4,11 @@ Agente de voz construido con [LiveKit Agents](https://docs.livekit.io/agents/) q
 llamadas de una cadena de restaurantes de pollo: escucha al cliente en español, consulta el
 menú en Postgres, arma el pedido y lo guarda cuando el cliente lo confirma.
 
+> **Documentación completa:** [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) describe el
+> estado actual del sistema y por qué está construido así; [`docs/SPEC.md`](docs/SPEC.md)
+> es el spec del producto — qué debe cumplir el sistema, contratos de cada tool y
+> criterios de aceptación. Este README es la puesta en marcha rápida.
+
 ## Cómo funciona
 
 ```
