@@ -55,6 +55,10 @@ VALUES
 CREATE TABLE orders (
     id SERIAL PRIMARY KEY,
     status VARCHAR(20) NOT NULL DEFAULT 'confirmed',
+    -- numero del cliente cuando la llamada entra por telefonia (sip.phoneNumber);
+    -- queda NULL en console/playground.
+    customer_phone VARCHAR(20),
+    total INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -62,5 +66,8 @@ CREATE TABLE order_items (
     id SERIAL PRIMARY KEY,
     order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     product_id INTEGER NOT NULL REFERENCES products(id),
-    quantity INTEGER NOT NULL CHECK (quantity > 0)
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    -- precio del producto al momento del pedido, para que un cambio de
+    -- precio futuro no altere pedidos ya confirmados
+    unit_price INTEGER NOT NULL
 );

@@ -8,7 +8,9 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: chicken_store
     ports:
-      - "5432:5432"
+      # El puerto del host se toma de DB_PORT en el .env (por defecto 5432),
+      # para poder convivir con otras Postgres corriendo en la maquina.
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
