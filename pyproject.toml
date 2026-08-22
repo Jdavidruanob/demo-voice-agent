@@ -1,0 +1,10 @@
+[project]
+name = "livekit-voice-agent"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = [
+    "livekit-agents[deepgram,fishaudio,openai,silero,turn-detector]~=1.5",
+    "livekit-plugins-noise-cancellation~=0.2",
+    "python-dotenv>=1.2.2",
+    "asyncpg>=0.31.0",
+]
