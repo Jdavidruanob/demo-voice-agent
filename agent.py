@@ -111,7 +111,17 @@ class Assistant(Agent):
               cantidades para confirmar que sean correctos, con la misma naturalidad de
               arriba (nombre completo del producto, cantidad en palabras).
             - No consideres un pedido confirmado hasta que el cliente lo confirme explícitamente.
-            - Cuando el cliente confirme, usa la herramienta confirm_order para guardar el pedido.
+            - Antes de usar confirm_order, SIEMPRE pregunta estos dos datos si aún no los
+              tienes (uno a la vez, no los dos juntos): a nombre de quién queda el pedido
+              (ej. "¿A nombre de quién le dejo el pedido?") y la dirección de entrega
+              (ej. "¿Me regala la dirección de entrega, por favor?"). No los des por
+              sentado ni los inventes, aunque el cliente ya haya mencionado algo parecido
+              antes: confírmalo explícitamente.
+            - Cuando tengas productos, nombre y dirección, y el cliente haya confirmado
+              todo, usa confirm_order pasándole customer_name y delivery_address.
+            - Al confirmar, dile al cliente que su pedido llega en aproximadamente
+              30 minutos (la tool ya te lo recuerda en su respuesta; repítelo con tus
+              palabras).
             - Si el cliente se corrige o cambia de opinión (ej. "quíteme la gaseosa",
               "mejor que sean tres", "cambie eso"), usa set_item_quantity con la
               cantidad final que debe quedar (0 para quitar el producto por completo).

@@ -25,7 +25,9 @@ métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
 **Fuera de alcance (explícito, no es un olvido):**
 - Múltiples sedes/sucursales.
 - Reservas de mesa.
-- Direcciones de entrega o estados de cocina (`en preparación`, `en camino`).
+- Estados de cocina (`en preparación`, `en camino`) o seguimiento del
+  domiciliario. El nombre y la dirección de entrega sí se capturan (ver
+  RF-9); lo que queda fuera es el tracking posterior al pedido.
 - Pagos.
 - Portal/dashboard para el restaurante (se discutió arquitectura — Postgres
   compartida entre agente y portal — pero no se construyó).
@@ -71,6 +73,14 @@ naturalidad, sin inventar disponibilidad ni productos.
 forma atómica (todo o nada), con el total correcto, y el stock se descuenta
 de forma consistente incluso si dos llamadas confirman al mismo tiempo sobre
 el mismo producto.
+
+**RF-9 — Nombre, dirección y tiempo de entrega.** Antes de confirmar, el
+agente siempre pregunta (uno a la vez) a nombre de quién queda el pedido y la
+dirección de entrega — nunca los asume ni los inventa, aunque el cliente los
+haya mencionado de pasada antes. `confirm_order` los exige como parámetros
+obligatorios, así que estructuralmente no puede confirmarse un pedido sin
+ambos. Al confirmar, el agente le informa al cliente un tiempo estimado de
+entrega (30 minutos fijos en esta demo, no un cálculo real de logística).
 
 ## 4. Requisitos no funcionales
 
@@ -131,15 +141,19 @@ Formato: nombre — precondición — postcondición — modo de fallo.
 - Postcondición: el pedido en curso queda vacío. No toca la base de datos.
 - Fallo: no aplica.
 
-**`confirm_order()`**
-- Precondición: el pedido en curso tiene al menos un item.
-- Postcondición: se crea una fila en `orders` (con `total` y
-  `customer_phone` si existe) y una fila por item en `order_items` (con
-  `unit_price` congelado); el stock de cada producto queda descontado; el
-  pedido en curso se vacía.
-- Fallo: `{"success": False, ...}` si el pedido está vacío. `ToolError` (en
-  español) si, al revalidar dentro de la transacción, el stock ya no alcanza
-  — caso de carrera con otra llamada concurrente.
+**`confirm_order(customer_name: str, delivery_address: str)`**
+- Precondición: el pedido en curso tiene al menos un item; `customer_name` y
+  `delivery_address` no pueden llegar vacíos (se valida con `.strip()`) — el
+  agente debe haberlos preguntado antes de llamar la tool.
+- Postcondición: se crea una fila en `orders` (con `total`, `customer_name`,
+  `delivery_address` y `customer_phone` si existe) y una fila por item en
+  `order_items` (con `unit_price` congelado); el stock de cada producto queda
+  descontado; el pedido en curso se vacía; la respuesta incluye
+  `eta_minutos` para que el agente se lo diga al cliente.
+- Fallo: `{"success": False, ...}` si el pedido está vacío o si falta nombre
+  o dirección. `ToolError` (en español) si, al revalidar dentro de la
+  transacción, el stock ya no alcanza — caso de carrera con otra llamada
+  concurrente.
 
 ## 6. Modelo de datos (invariantes)
 
@@ -150,6 +164,9 @@ Formato: nombre — precondición — postcondición — modo de fallo.
   para ese pedido. Se calcula en Python al confirmar, no se recalcula después.
 - El stock de un producto nunca debe quedar negativo. Se protege con
   `SELECT ... FOR UPDATE` dentro de la transacción de `confirm_order`.
+- `orders.customer_name` y `orders.delivery_address` son `NOT NULL`: un
+  pedido confirmado siempre tiene ambos, porque `confirm_order` los exige
+  como parámetros y los valida antes de insertar (ver RF-9).
 
 ## 7. Criterios de aceptación (escenarios de prueba)
 
@@ -169,9 +186,14 @@ pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
    natural, sin excepción ni silencio.
 7. Pedir un producto inexistente (ej. "una hamburguesa") → lo dice con
    naturalidad, sin inventar.
-8. Confirmar el pedido → se guarda en `orders`/`order_items`, el stock se
-   descuenta, y una segunda consulta a la base refleja exactamente lo
-   pedido.
+8. Confirmar el pedido → el agente pregunta nombre y dirección antes de
+   usar `confirm_order` (no los asume aunque se hayan mencionado antes); se
+   guarda en `orders`/`order_items` con `customer_name`/`delivery_address`,
+   el stock se descuenta, el agente informa un tiempo de entrega estimado, y
+   una segunda consulta a la base refleja exactamente lo pedido.
+   **(Este escenario era el bug reportado en vivo: el agente confirmaba sin
+   pedir nombre ni dirección — corregido haciendo ambos parámetros
+   obligatorios de `confirm_order`.)**
 
 La suite automática usada para verificar 4, 6, 7 y 8 contra Postgres real
 (sin voz) vive fuera del repo, en el scratchpad de la sesión que hizo el
@@ -187,8 +209,13 @@ es trabajo pendiente (ver § 9).
 - `gpt-4.1-mini` sigue siendo el LLM por defecto aunque el benchmark mostró
   candidatos más rápidos; cambiarlo es una decisión pendiente de quien
   compare calidad de respuesta, no solo latencia.
-- Ningún dato de reservas, direcciones ni estados de cocina se agrega a
-  propósito en esta fase — mantiene el alcance chico y la demo enfocada.
+- Ningún dato de reservas ni estados de cocina se agrega a propósito en
+  esta fase — mantiene el alcance chico y la demo enfocada. Nombre y
+  dirección de entrega sí se capturan (RF-9): son mínimos para que el
+  pedido sea entregable, no un dato "de más".
+- El tiempo de entrega (30 min) es un estimado fijo de la demo, no un
+  cálculo real; cambiarlo por una lógica real de logística es trabajo
+  pendiente si se retoma el proyecto en serio (ver § 9).
 
 ## 9. Fuera de alcance, pero ya discutido — próximos pasos si se retoma
 

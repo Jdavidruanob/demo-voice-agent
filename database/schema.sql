@@ -58,6 +58,11 @@ CREATE TABLE orders (
     -- numero del cliente cuando la llamada entra por telefonia (sip.phoneNumber);
     -- queda NULL en console/playground.
     customer_phone VARCHAR(20),
+    -- a nombre de quien queda el pedido y donde se entrega; confirm_order
+    -- los exige como parametros obligatorios, asi que nunca quedan vacios
+    -- en un pedido confirmado.
+    customer_name VARCHAR(100) NOT NULL,
+    delivery_address TEXT NOT NULL,
     total INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );

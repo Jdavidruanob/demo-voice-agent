@@ -3,6 +3,10 @@ from dataclasses import dataclass, field
 from livekit.agents import RunContext, ToolError, function_tool
 from database.connection import create_pool
 
+# Tiempo de entrega que se le informa al cliente al confirmar. Es un
+# estimado fijo de la demo, no un calculo real de logistica/reparto.
+ETA_MINUTOS = 30
+
 
 @dataclass
 class ItemPedido:
@@ -20,11 +24,16 @@ class PedidoEnCurso:
     (cada AgentSession) tiene su propia instancia, asi que dos llamadas
     simultaneas en el mismo proceso nunca comparten ni mezclan su pedido.
     `customer_phone` se llena desde telefonia (sip.phoneNumber) cuando
-    aplica; en console/playground queda en None.
+    aplica; en console/playground queda en None. `customer_name` y
+    `delivery_address` los pide confirm_order como parametros obligatorios
+    (ver su docstring): asi el propio contrato de la tool obliga a
+    preguntarlos antes de poder cerrar el pedido.
     """
 
     items: list[ItemPedido] = field(default_factory=list)
     customer_phone: str | None = None
+    customer_name: str | None = None
+    delivery_address: str | None = None
 
     @property
     def total(self) -> int:
@@ -178,11 +187,14 @@ async def vaciar_pedido(ctx: RunContext[PedidoEnCurso]):
 
 
 @function_tool
-async def confirm_order(ctx: RunContext[PedidoEnCurso]):
+async def confirm_order(ctx: RunContext[PedidoEnCurso], customer_name: str, delivery_address: str):
     """Confirma y guarda el pedido actual en la base de datos.
 
     Debe usarse solo despues de que el cliente confirmo explicitamente
-    todos los productos y cantidades de su pedido.
+    todos los productos y cantidades de su pedido, Y despues de haberle
+    preguntado el nombre a nombre de quien queda el pedido y la direccion
+    de entrega. No inventes ni asumas estos dos datos: pidelos siempre,
+    incluso si el cliente ya dio uno de los dos antes de que se lo pidieras.
     """
 
     pedido = ctx.userdata
@@ -192,6 +204,20 @@ async def confirm_order(ctx: RunContext[PedidoEnCurso]):
             "success": False,
             "message": "No hay productos en el pedido todavia.",
         }
+
+    customer_name = customer_name.strip()
+    delivery_address = delivery_address.strip()
+    if not customer_name or not delivery_address:
+        return {
+            "success": False,
+            "message": (
+                "Antes de confirmar necesito el nombre a nombre de quien queda "
+                "el pedido y la dirección de entrega."
+            ),
+        }
+
+    pedido.customer_name = customer_name
+    pedido.delivery_address = delivery_address
 
     pool = await create_pool()
 
@@ -217,11 +243,14 @@ async def confirm_order(ctx: RunContext[PedidoEnCurso]):
 
             order_id = await conn.fetchval(
                 """
-                INSERT INTO orders (status, customer_phone, total)
-                VALUES ('confirmed', $1, $2)
+                INSERT INTO orders
+                    (status, customer_phone, customer_name, delivery_address, total)
+                VALUES ('confirmed', $1, $2, $3, $4)
                 RETURNING id;
                 """,
                 pedido.customer_phone,
+                pedido.customer_name,
+                pedido.delivery_address,
                 pedido.total,
             )
 
@@ -247,7 +276,11 @@ async def confirm_order(ctx: RunContext[PedidoEnCurso]):
 
     return {
         "success": True,
-        "message": "Pedido confirmado y guardado.",
+        "message": (
+            f"Pedido confirmado a nombre de {customer_name}, entregado en "
+            f"{delivery_address}. Llega en aproximadamente {ETA_MINUTOS} minutos."
+        ),
         "order_id": order_id,
         "total": total,
+        "eta_minutos": ETA_MINUTOS,
     }

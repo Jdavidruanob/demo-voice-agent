@@ -85,6 +85,8 @@ ajustando una variable de entorno.
 class PedidoEnCurso:
     items: list[ItemPedido]
     customer_phone: str | None
+    customer_name: str | None
+    delivery_address: str | None
 ```
 
 Cada `AgentSession` tiene su propia instancia (`AgentSession[PedidoEnCurso](userdata=PedidoEnCurso(), ...)`).
@@ -106,7 +108,7 @@ Esto importa por dos razones:
 | `add_item_to_order(product_id, quantity)` | Agrega un producto al pedido en curso | Producto existe; hay stock suficiente (sumando lo que ya llevaba pedido) |
 | `set_item_quantity(product_id, quantity)` | Corrige la cantidad de un producto ya agregado; `quantity=0` lo quita | Igual que `add_item_to_order`, salvo cuando `quantity=0` |
 | `vaciar_pedido()` | Borra todo el pedido en curso sin tocar la base de datos | — |
-| `confirm_order()` | Persiste el pedido: crea la fila en `orders`, una fila por item en `order_items`, descuenta stock | Revalida stock con `SELECT ... FOR UPDATE` dentro de la transacción (protege contra una carrera con otra llamada concurrente) |
+| `confirm_order(customer_name, delivery_address)` | Persiste el pedido: crea la fila en `orders`, una fila por item en `order_items`, descuenta stock, e informa un tiempo de entrega estimado (`eta_minutos`) | `customer_name` y `delivery_address` no pueden llegar vacíos — es la tool, no el prompt, la que obliga a que el agente los haya preguntado antes. Revalida stock con `SELECT ... FOR UPDATE` dentro de la transacción (protege contra una carrera con otra llamada concurrente) |
 
 Todas menos `search_products` reciben `ctx: RunContext[PedidoEnCurso]` como
 primer parámetro (LiveKit Agents lo inyecta automáticamente por tipo, no por
@@ -128,7 +130,7 @@ cualquier otro resultado de tool.
 
 ```sql
 products (id, name, description, price, stock, category, keywords[])
-orders   (id, status, customer_phone, total, created_at)
+orders   (id, status, customer_phone, customer_name, delivery_address, total, created_at)
 order_items (id, order_id, product_id, quantity, unit_price)
 ```
 
@@ -139,6 +141,13 @@ order_items (id, order_id, product_id, quantity, unit_price)
   tiene que sumar pesos colombianos de cabeza.
 - `customer_phone` queda `NULL` en console/playground. Se llena solo si la
   llamada entra por SIP (ver siguiente sección).
+- `customer_name` y `delivery_address` son `NOT NULL`: `confirm_order` los
+  exige como parámetros obligatorios, así que un pedido confirmado siempre
+  los tiene. El agente debe preguntarlos explícitamente antes de confirmar
+  (ver el prompt en `agent.py`); no se asumen ni se infieren.
+- El tiempo de entrega que se le informa al cliente (`ETA_MINUTOS = 30` en
+  `tools/orders.py`) es un valor fijo de la demo, no un cálculo real de
+  logística/reparto.
 - Búsqueda difusa vía extensión `pg_trgm` + índices GIN trigram sobre `name`
   y `description`, más coincidencia por substring sobre `keywords`.
 
