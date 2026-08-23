@@ -15,6 +15,7 @@ from tools.orders import (
     vaciar_pedido,
     confirm_order,
 )
+from tools.call import finalizar_llamada
 
 load_dotenv()
 
@@ -32,6 +33,26 @@ STT_MODEL = os.getenv("STT_MODEL", "deepgram/flux-general-multi")
 # telefonia real. Apagado en la demo para no alargar el saludo; se activa
 # con AVISO_LEGAL=true el dia que esto atienda llamadas de verdad.
 AVISO_LEGAL = os.getenv("AVISO_LEGAL", "false").lower() == "true"
+
+# Apellidos colombianos frecuentes pero poco comunes en el ingles/generico
+# con el que suelen entrenarse los modelos de STT (a los clientes les ha
+# costado que el bot entienda "Ruano" o "Burbano", por ejemplo). Se pasan
+# como "keyterm" a Deepgram para sesgar la transcripcion hacia ellos.
+# Esto no es una lista exhaustiva ni una garantia: solo mejora la
+# probabilidad para estos apellidos puntuales. Si el restaurante conoce
+# apellidos frecuentes de su propia clientela, vale la pena agregarlos aqui.
+APELLIDOS_A_RECONOCER = [
+    "Ruano",
+    "Burbano",
+    "Bermúdez",
+    "Cifuentes",
+    "Gutiérrez",
+    "Marulanda",
+    "Ospina",
+    "Quintero",
+    "Yepes",
+    "Zapata",
+]
 
 SALUDO = "¡Hola! Bienvenido, soy el asistente de pedidos. ¿Qué le gustaría ordenar hoy?"
 if AVISO_LEGAL:
@@ -56,13 +77,21 @@ def _build_turn_pipeline():
     cargar un plugin deprecado cuando no se usa.
     """
     if STT_MODEL.startswith("deepgram/flux"):
-        stt_component = inference.STT(model=STT_MODEL, language="es")
+        stt_component = inference.STT(
+            model=STT_MODEL,
+            language="es",
+            extra_kwargs={"keyterm": APELLIDOS_A_RECONOCER},
+        )
         turn_detection = "stt"
         endpointing = {"min_delay": 0.1, "max_delay": 2.5}
     else:
         from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-        stt_component = f"{STT_MODEL}:es"
+        stt_component = inference.STT(
+            model=STT_MODEL,
+            language="es",
+            extra_kwargs={"keyterm": APELLIDOS_A_RECONOCER},
+        )
         turn_detection = MultilingualModel()
         endpointing = {"min_delay": 0.3, "max_delay": 2.5}
 
@@ -117,11 +146,24 @@ class Assistant(Agent):
               (ej. "¿Me regala la dirección de entrega, por favor?"). No los des por
               sentado ni los inventes, aunque el cliente ya haya mencionado algo parecido
               antes: confírmalo explícitamente.
-            - Cuando tengas productos, nombre y dirección, y el cliente haya confirmado
-              todo, usa confirm_order pasándole customer_name y delivery_address.
+            - Ya con los dos datos, antes de llamar a confirm_order repítelos JUNTOS en
+              una sola frase y pide confirmación explícita (ej. "Entonces el pedido queda
+              a nombre de Laura Gómez, con entrega en la Carrera 10 #20-30, ¿así está
+              bien?"). No llames a confirm_order hasta que el cliente confirme que ambos
+              datos están correctos.
+            - Si el cliente corrige el nombre o la dirección en ese momento (por ejemplo
+              porque el nombre se escuchó mal), usa el dato corregido y repite la
+              confirmación de los dos datos otra vez antes de continuar. No asumas que el
+              resto del pedido cambió solo porque corrigió el nombre o la dirección.
+            - Cuando tengas productos, nombre y dirección ya confirmados por el cliente,
+              usa confirm_order pasándole customer_name y delivery_address.
             - Al confirmar, dile al cliente que su pedido llega en aproximadamente
               30 minutos (la tool ya te lo recuerda en su respuesta; repítelo con tus
               palabras).
+            - Después de confirmar, pregunta si necesita algo más. Si el cliente dice que
+              no, despídete cordialmente y, en ese MISMO turno, usa finalizar_llamada para
+              cerrar la llamada (no la llames antes de confirmar el pedido, ni en un turno
+              aparte después de ya haberte despedido).
             - Si el cliente se corrige o cambia de opinión (ej. "quíteme la gaseosa",
               "mejor que sean tres", "cambie eso"), usa set_item_quantity con la
               cantidad final que debe quedar (0 para quitar el producto por completo).
@@ -147,6 +189,7 @@ class Assistant(Agent):
                 set_item_quantity,
                 vaciar_pedido,
                 confirm_order,
+                finalizar_llamada,
             ],
         )
 

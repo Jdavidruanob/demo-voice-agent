@@ -77,10 +77,22 @@ el mismo producto.
 **RF-9 — Nombre, dirección y tiempo de entrega.** Antes de confirmar, el
 agente siempre pregunta (uno a la vez) a nombre de quién queda el pedido y la
 dirección de entrega — nunca los asume ni los inventa, aunque el cliente los
-haya mencionado de pasada antes. `confirm_order` los exige como parámetros
+haya mencionado de pasada antes. Una vez tiene ambos, los repite **juntos**
+en una sola frase y espera confirmación explícita del cliente antes de
+llamar a `confirm_order`; si el cliente corrige el nombre o la dirección en
+ese momento, el agente actualiza el dato y repite la confirmación de nuevo
+antes de continuar. `confirm_order` exige los dos como parámetros
 obligatorios, así que estructuralmente no puede confirmarse un pedido sin
-ambos. Al confirmar, el agente le informa al cliente un tiempo estimado de
-entrega (30 minutos fijos en esta demo, no un cálculo real de logística).
+ambos — pero el requisito de repetirlos juntos y esperar confirmación es
+disciplina de conversación (prompt), no un contrato de la tool. Al confirmar,
+el agente le informa al cliente un tiempo estimado de entrega (30 minutos
+fijos en esta demo, no un cálculo real de logística).
+
+**RF-10 — Cierre de llamada tras la despedida.** Una vez el pedido está
+confirmado y el cliente indica que no necesita nada más, el agente se
+despide y cierra la llamada (`finalizar_llamada`) en el mismo turno de la
+despedida, sin cortar el audio a mitad de frase. `finalizar_llamada` rechaza
+cerrar si todavía no hay ningún pedido confirmado en la llamada.
 
 ## 4. Requisitos no funcionales
 
@@ -148,12 +160,23 @@ Formato: nombre — precondición — postcondición — modo de fallo.
 - Postcondición: se crea una fila en `orders` (con `total`, `customer_name`,
   `delivery_address` y `customer_phone` si existe) y una fila por item en
   `order_items` (con `unit_price` congelado); el stock de cada producto queda
-  descontado; el pedido en curso se vacía; la respuesta incluye
-  `eta_minutos` para que el agente se lo diga al cliente.
+  descontado; el pedido en curso se vacía; `userdata.order_id` queda con el
+  id de la orden creada; la respuesta incluye `eta_minutos` para que el
+  agente se lo diga al cliente.
 - Fallo: `{"success": False, ...}` si el pedido está vacío o si falta nombre
   o dirección. `ToolError` (en español) si, al revalidar dentro de la
   transacción, el stock ya no alcanza — caso de carrera con otra llamada
   concurrente.
+
+**`finalizar_llamada()`**
+- Precondición: `userdata.order_id` no es `None` (ya se confirmó un pedido en
+  esta llamada).
+- Postcondición: espera a que termine de sonar el habla del turno que la
+  invocó (`ctx.speech_handle.wait_for_playout()`), agrega un colchón fijo de
+  0.3s, y termina el proceso (`os._exit(0)`). No hay retorno útil para el
+  agente: la llamada ya terminó.
+- Fallo: `{"success": False, "message": "..."}` si no hay ningún pedido
+  confirmado todavía — no cierra nada en ese caso.
 
 ## 6. Modelo de datos (invariantes)
 
@@ -187,13 +210,22 @@ pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
 7. Pedir un producto inexistente (ej. "una hamburguesa") → lo dice con
    naturalidad, sin inventar.
 8. Confirmar el pedido → el agente pregunta nombre y dirección antes de
-   usar `confirm_order` (no los asume aunque se hayan mencionado antes); se
-   guarda en `orders`/`order_items` con `customer_name`/`delivery_address`,
-   el stock se descuenta, el agente informa un tiempo de entrega estimado, y
-   una segunda consulta a la base refleja exactamente lo pedido.
+   usar `confirm_order` (no los asume aunque se hayan mencionado antes),
+   repite ambos juntos y espera confirmación explícita antes de llamar la
+   tool; se guarda en `orders`/`order_items` con
+   `customer_name`/`delivery_address`, el stock se descuenta, el agente
+   informa un tiempo de entrega estimado, y una segunda consulta a la base
+   refleja exactamente lo pedido.
    **(Este escenario era el bug reportado en vivo: el agente confirmaba sin
    pedir nombre ni dirección — corregido haciendo ambos parámetros
-   obligatorios de `confirm_order`.)**
+   obligatorios de `confirm_order` y exigiendo en el prompt que se repitan
+   juntos y se confirmen antes de llamarla.)**
+9. Al repetir nombre y dirección juntos, decir *"no, el nombre está mal, es
+   [apellido]"* → el agente corrige el dato y vuelve a repetir la
+   confirmación con el valor corregido, sin llamar a `confirm_order` todavía.
+10. Después de confirmar, decir *"no, eso es todo, gracias"* → el agente se
+    despide y, en el mismo turno, cierra la llamada (`finalizar_llamada`) sin
+    cortar el audio de la despedida a mitad de frase.
 
 La suite automática usada para verificar 4, 6, 7 y 8 contra Postgres real
 (sin voz) vive fuera del repo, en el scratchpad de la sesión que hizo el

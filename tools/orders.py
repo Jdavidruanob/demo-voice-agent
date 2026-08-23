@@ -27,13 +27,17 @@ class PedidoEnCurso:
     aplica; en console/playground queda en None. `customer_name` y
     `delivery_address` los pide confirm_order como parametros obligatorios
     (ver su docstring): asi el propio contrato de la tool obliga a
-    preguntarlos antes de poder cerrar el pedido.
+    preguntarlos antes de poder cerrar el pedido. `order_id` queda en None
+    hasta que confirm_order guarda con exito; finalizar_llamada (agent.py)
+    lo usa para no dejar que el agente cuelgue la llamada sin haber
+    confirmado nada.
     """
 
     items: list[ItemPedido] = field(default_factory=list)
     customer_phone: str | None = None
     customer_name: str | None = None
     delivery_address: str | None = None
+    order_id: int | None = None
 
     @property
     def total(self) -> int:
@@ -273,6 +277,7 @@ async def confirm_order(ctx: RunContext[PedidoEnCurso], customer_name: str, deli
 
     total = pedido.total
     pedido.items.clear()
+    pedido.order_id = order_id
 
     return {
         "success": True,

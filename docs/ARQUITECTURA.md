@@ -34,6 +34,7 @@ agent.py: Assistant
       - set_item_quantity    (tools/orders.py)
       - vaciar_pedido        (tools/orders.py)
       - confirm_order        (tools/orders.py)
+      - finalizar_llamada    (tools/call.py)
     │
     ▼
 session.userdata: PedidoEnCurso   (estado de ESTA llamada, no global)
@@ -69,6 +70,17 @@ Hay un camino de respaldo si Flux no convence en español-CO: cambiar
 `STT_MODEL=deepgram/nova-2` en `.env` vuelve automáticamente al detector de
 turno separado (ver `agent.py:_build_turn_pipeline`).
 
+### Reconocimiento de apellidos poco comunes
+
+Al STT (Deepgram, en ambos caminos de `_build_turn_pipeline`) se le pasa
+`extra_kwargs={"keyterm": APELLIDOS_A_RECONOCER}` con una lista corta de
+apellidos colombianos que un modelo genérico tiende a transcribir mal
+("Ruano", "Burbano", etc.) — Deepgram permite sesgar la transcripción hacia
+una lista de términos concretos. No es una solución exhaustiva (no hay forma
+de anticipar todos los apellidos posibles), por eso se complementa con la
+confirmación explícita descrita abajo: si el nombre quedó mal transcrito, el
+cliente lo corrige ahí antes de que se guarde.
+
 ### Por qué la voz no aparece como configurable
 
 Decisión explícita del dueño del producto: `aura-2` / `celeste` / `es-CO` es
@@ -87,6 +99,7 @@ class PedidoEnCurso:
     customer_phone: str | None
     customer_name: str | None
     delivery_address: str | None
+    order_id: int | None
 ```
 
 Cada `AgentSession` tiene su propia instancia (`AgentSession[PedidoEnCurso](userdata=PedidoEnCurso(), ...)`).
@@ -100,7 +113,7 @@ Esto importa por dos razones:
    llamadas (jobs) en el mismo proceso; sin este cambio, telefonía real
    habría sido inviable sin reescribir esto de todas formas.
 
-## Las cinco tools
+## Las seis tools
 
 | Tool | Qué hace | Validaciones |
 |---|---|---|
@@ -108,11 +121,36 @@ Esto importa por dos razones:
 | `add_item_to_order(product_id, quantity)` | Agrega un producto al pedido en curso | Producto existe; hay stock suficiente (sumando lo que ya llevaba pedido) |
 | `set_item_quantity(product_id, quantity)` | Corrige la cantidad de un producto ya agregado; `quantity=0` lo quita | Igual que `add_item_to_order`, salvo cuando `quantity=0` |
 | `vaciar_pedido()` | Borra todo el pedido en curso sin tocar la base de datos | — |
-| `confirm_order(customer_name, delivery_address)` | Persiste el pedido: crea la fila en `orders`, una fila por item en `order_items`, descuenta stock, e informa un tiempo de entrega estimado (`eta_minutos`) | `customer_name` y `delivery_address` no pueden llegar vacíos — es la tool, no el prompt, la que obliga a que el agente los haya preguntado antes. Revalida stock con `SELECT ... FOR UPDATE` dentro de la transacción (protege contra una carrera con otra llamada concurrente) |
+| `confirm_order(customer_name, delivery_address)` | Persiste el pedido: crea la fila en `orders`, una fila por item en `order_items`, descuenta stock, e informa un tiempo de entrega estimado (`eta_minutos`); deja `order_id` en `userdata` | `customer_name` y `delivery_address` no pueden llegar vacíos — es la tool, no el prompt, la que obliga a que el agente los haya preguntado antes. Revalida stock con `SELECT ... FOR UPDATE` dentro de la transacción (protege contra una carrera con otra llamada concurrente) |
+| `finalizar_llamada()` | Cierra el proceso de la llamada después de la despedida | Falla (sin cerrar nada) si `userdata.order_id` sigue en `None`, es decir, si no se confirmó ningún pedido en la llamada |
 
 Todas menos `search_products` reciben `ctx: RunContext[PedidoEnCurso]` como
 primer parámetro (LiveKit Agents lo inyecta automáticamente por tipo, no por
 nombre) y operan sobre `ctx.userdata`.
+
+### Confirmación de nombre y dirección, y cierre automático de la llamada
+
+El prompt (`agent.py: Assistant.__init__`) exige que, una vez el agente tiene
+nombre y dirección, los repita **juntos** en una sola frase y espere
+confirmación explícita del cliente antes de invocar `confirm_order`; si el
+cliente corrige alguno de los dos, el agente actualiza y vuelve a confirmar.
+Esto es disciplina de prompt, no un contrato de la tool: `confirm_order`
+sigue aceptando el valor final que se le pase, tal como antes.
+
+Después de confirmar, si el cliente no necesita nada más, el agente se
+despide y llama a `finalizar_llamada` **en el mismo turno** en el que se
+despidió. La tool espera a que termine de sonar esa despedida
+(`ctx.speech_handle.wait_for_playout()`) y solo entonces hace `os._exit(0)`:
+
+- En `agent.py console`, esto termina el propio proceso — la terminal vuelve
+  al prompt de la shell sola, sin que el usuario tenga que cerrarla a mano.
+- En `dev`/producción, cada llamada corre en su propio subproceso
+  (`JobExecutorType.PROCESS`, el default de LiveKit Agents), así que esto
+  solo cuelga esa llamada puntual; el worker sigue atendiendo las demás.
+
+Es una salida dura a propósito (no un apagado ordenado de sesión): se acepta
+porque ocurre después de que la respuesta ya se confirmó como guardada y de
+que el audio de la despedida ya terminó de sonar.
 
 ### Manejo de errores: `ToolError`, no excepciones genéricas
 
