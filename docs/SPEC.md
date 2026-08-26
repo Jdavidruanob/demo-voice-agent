@@ -63,7 +63,11 @@ del pedido.
 
 **RF-6 — Confirmación explícita.** El pedido solo se considera final cuando
 el cliente lo confirma de forma explícita después de que el agente repite
-productos y cantidades. Nunca se persiste antes de esa confirmación.
+productos y cantidades. Nunca se persiste antes de esa confirmación. Esa
+repetición debe sonar natural, no como una lectura de datos: cantidades en
+palabras, nombre completo del producto, y pluralización cuando la cantidad es
+mayor a uno (ej. "dos Coca-Colas y una hamburguesa", no "2 de Coca-Cola y 1
+de hamburguesa").
 
 **RF-7 — Rechazo de lo inexistente.** Si el cliente pide algo que no está en
 el menú o una cantidad que excede el stock disponible, el sistema lo dice con
@@ -88,7 +92,14 @@ entrega (30 minutos fijos en esta demo, no un cálculo real de logística).
 cliente termina de hablar y el agente empieza a responder (`e2e_latency`,
 ver `docs/ARQUITECTURA.md` § Observabilidad) debe mantenerse bajo, y ningún
 paso intermedio (consultar el menú, buscar un producto) debe introducir un
-silencio perceptible sin que el agente diga algo mientras tanto.
+silencio perceptible sin que el agente diga algo mientras tanto. Parte de
+esto es percepción, no solo latencia real: el agente usa ocasionalmente
+muletillas de transición variadas ("a ver, dame un segundo...", "déjame
+confirmo...") antes de una búsqueda o al confirmar, para sonar como una
+persona pensando en vez de un sistema respondiendo de forma instantánea y
+perfecta. Es ocasional y variado a propósito (ver `agent.py` § TONO Y
+LATENCIA CONVERSACIONAL) — usarlo en cada turno tendría el efecto contrario
+y sonaría mecánico.
 
 **RNF-2 — Voz fija.** La voz (`aura-2` / `celeste` / `es-CO`) es una decisión
 de producto ya tomada y aprobada. Ningún cambio futuro debe alterarla salvo

@@ -101,6 +101,31 @@ class Assistant(Agent):
               ("pollo" en vez de "Pollo Asado"). Di las cantidades en palabras y usa el
               nombre completo del producto, como lo diría una persona real (ej. "un Pollo
               Asado y una Coca-Cola", no "1 de pollo y 1 de gaseosa").
+            - Cuando la cantidad sea mayor a uno, pluraliza el nombre del producto en vez
+              de usar la muletilla "X de [producto]" (ej. "dos Coca-Colas", "tres
+              hamburguesas", "dos papas medianas"; nunca "2 de Coca-Cola" ni "2 de
+              hamburguesa"). Usa "X de [producto]" solo cuando sea gramaticalmente
+              indispensable porque el producto no se pluraliza solo de forma natural (ej.
+              "dos botellas de agua"), no como regla general.
+            - Al leer una lista de productos en voz alta (al agregar o al confirmar),
+              que suene como la diría una persona real por teléfono, no como una lectura
+              mecánica ítem por ítem: usa comas y "y" de forma natural entre los
+              productos.
+
+            TONO Y LATENCIA CONVERSACIONAL:
+            - No respondas siempre de forma instantánea y perfecta, como si fueras un
+              texto escrito. Cuando vayas a usar una herramienta (buscar un producto,
+              agregarlo, confirmar el pedido) o necesites "verificar" algo, puedes usar
+              una frase corta de transición antes, como lo haría una persona real
+              revisando algo (ej. "A ver, dame un segundo...", "Anota esto...", "Déjame
+              confirmo...", "Vale, dame un momento y lo reviso...", "Listo, a ver...").
+            - Varía la frase que uses; no repitas siempre la misma o suena artificial.
+            - Esto es ocasional, no en cada turno: úsalo de vez en cuando, no en cada
+              respuesta ni en respuestas simples y directas (ej. un saludo o un "sí,
+              claro" no necesitan transición). Si lo usas siempre deja de sonar natural
+              y se convierte en una muletilla mecánica, justo lo contrario de la idea.
+            - El objetivo es sonar cercano y conversacional, no robótico ni como un
+              texto perfectamente estructurado, pero tampoco dudoso o poco profesional.
 
             PEDIDOS:
             - El menú de arriba ya lo conoces: para preguntas generales o por categoría
@@ -227,7 +252,13 @@ async def entrypoint(ctx: JobContext):
             voice="celeste",
             language="es-CO",
         ),
-        vad=silero.VAD.load(),
+        # min_speech_duration y activation_threshold subidos del default (0.05s /
+        # 0.5) para que un ruido de fondo o una muletilla corta del cliente no
+        # corte el audio del agente a mitad de frase.
+        vad=silero.VAD.load(
+            min_speech_duration=0.35,
+            activation_threshold=0.6,
+        ),
         turn_handling={
             "turn_detection": turn_detection,
             "endpointing": endpointing,
