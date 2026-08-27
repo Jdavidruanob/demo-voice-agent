@@ -3,7 +3,16 @@ import os
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, room_io, inference
+from livekit.agents import (
+    Agent,
+    AgentServer,
+    AgentSession,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    JobContext,
+    room_io,
+    inference,
+)
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import noise_cancellation, silero
 
@@ -32,6 +41,12 @@ STT_MODEL = os.getenv("STT_MODEL", "deepgram/flux-general-multi")
 # telefonia real. Apagado en la demo para no alargar el saludo; se activa
 # con AVISO_LEGAL=true el dia que esto atienda llamadas de verdad.
 AVISO_LEGAL = os.getenv("AVISO_LEGAL", "false").lower() == "true"
+
+# Ruido de sala de fondo en bucle (bandeja, murmullo de restaurante) para que
+# la llamada no suene a silencio digital perfecto. Volumen deliberadamente
+# bajo: nada que compita con la voz del TTS ni con el STT del cliente.
+AMBIENCE_AUDIO_PATH = "assets/restaurant_ambience.wav"
+AMBIENCE_VOLUME = 0.04
 
 SALUDO = "¡Hola! Bienvenido, soy el asistente de pedidos. ¿Qué le gustaría ordenar hoy?"
 if AVISO_LEGAL:
@@ -126,6 +141,35 @@ class Assistant(Agent):
               y se convierte en una muletilla mecánica, justo lo contrario de la idea.
             - El objetivo es sonar cercano y conversacional, no robótico ni como un
               texto perfectamente estructurado, pero tampoco dudoso o poco profesional.
+
+            EXPRESIONES HUMANAS Y MATICES VOCALES:
+            - Tu texto llega tal cual al TTS (sin filtrar puntuación), así que úsala con
+              intención: los puntos suspensivos y las comas son la señal que el TTS usa
+              para generar pausas y variaciones de entonación naturales. No las quites ni
+              escribas todo corrido sin puntuación.
+            - De vez en cuando, además de las frases de transición de arriba, suma un
+              matiz vocal corto y natural: "mmm..." al pensar o verificar algo, una risa
+              suave "jajaja" si el cliente dice algo gracioso o cordial, o una
+              exclamación corta como "ahhh ya" al caer en cuenta de algo (ej. "ahhh ya,
+              el combo familiar").
+            - Igual que las transiciones: es ocasional y variado, nunca en cada turno ni
+              combinado con una frase de transición en el mismo turno. Usarlo de más
+              suena forzado y poco profesional para una llamada de pedido real; un par de
+              veces en toda la conversación basta para sentirse humano sin distraer del
+              pedido.
+
+            ESCUCHA ACTIVA (BACKCHANNELING):
+            - Cuando te toque hablar y el cliente claramente sigue enumerando productos o
+              a mitad de una explicación (ej. hizo una pausa corta para pensar en el
+              siguiente ítem, no terminó una frase), no lances una pregunta ni una
+              respuesta larga: responde con un backchannel breve ("ajá", "sí", "listo",
+              "dale") que confirme que sigues escuchando, y deja que el cliente continúe.
+            - Reserva las respuestas completas (preguntas, confirmaciones, resúmenes) para
+              cuando el cliente realmente terminó de decir lo que quería.
+            - Nota técnica: esto no es audio superpuesto en tiempo real (el pipeline no lo
+              soporta hoy, ver docs/SPEC.md § Fuera de alcance); es que tu respuesta de
+              turno, cuando el corte de turno se sintió prematuro, sea mínima en vez de
+              tomarse la palabra por completo.
 
             PEDIDOS:
             - El menú de arriba ya lo conoces: para preguntas generales o por categoría
@@ -231,7 +275,7 @@ def _capturar_telefono_sip(session: AgentSession[PedidoEnCurso], room: rtc.Room)
 
 
 # The entrypoint function runs when a participant joins the room
-@server.rtc_session()
+@server.rtc_session(agent_name="agente-pollo")
 async def entrypoint(ctx: JobContext):
     # Una sola consulta a Postgres al arrancar la sesion, en vez de una
     # tool (get_menu) que el agente tendria que invocar y esperar en medio
@@ -283,6 +327,17 @@ async def entrypoint(ctx: JobContext):
             ),
         ),
     )
+
+    # Pista de audio de fondo independiente de la del agente: BackgroundAudioPlayer
+    # crea su propio AudioSource/LocalAudioTrack, publica en la sala y hace el loop
+    # del wav sin bloquear el event loop (decodifica y resamplea via ffmpeg/av).
+    # ctx.add_shutdown_callback asegura que se cierre y despublique al colgar,
+    # incluso si la llamada termina de forma abrupta.
+    background_audio = BackgroundAudioPlayer(
+        ambient_sound=AudioConfig(AMBIENCE_AUDIO_PATH, volume=AMBIENCE_VOLUME),
+    )
+    await background_audio.start(room=ctx.room, agent_session=session)
+    ctx.add_shutdown_callback(background_audio.aclose)
 
     _capturar_telefono_sip(session, ctx.room)
 

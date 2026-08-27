@@ -34,6 +34,18 @@ métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
 - Conexión a un número de teléfono real (troncal SIP, portabilidad).
   Discutido a fondo (ver hilo de decisiones más abajo) pero no iniciado.
 - Multi-idioma. Solo español.
+- Backchanneling con audio real superpuesto (que el agente diga "ajá" con su
+  propia voz *mientras* el cliente sigue hablando, sin cerrar su turno). El
+  `AgentSession` de `livekit-agents` es de un solo canal: el LLM solo genera
+  una respuesta después de que el turno del usuario se cierra, y una pausa
+  más corta que `min_silence_duration` del VAD no emite ningún evento que se
+  pueda interceptar. Implementarlo de verdad requeriría esquivar el pipeline
+  LLM/TTS con detección de energía sobre audio crudo y un clip pregrabado —
+  una feature de audio en tiempo real aparte, no un ajuste de pipeline. Lo
+  que sí se implementó como aproximación es a nivel de prompt: cuando el
+  agente recibe el turno y el pedido claramente sigue, responde con un
+  backchannel corto en vez de una respuesta completa (ver `agent.py` §
+  ESCUCHA ACTIVA).
 
 ## 3. Requisitos funcionales
 
@@ -99,7 +111,12 @@ confirmo...") antes de una búsqueda o al confirmar, para sonar como una
 persona pensando en vez de un sistema respondiendo de forma instantánea y
 perfecta. Es ocasional y variado a propósito (ver `agent.py` § TONO Y
 LATENCIA CONVERSACIONAL) — usarlo en cada turno tendría el efecto contrario
-y sonaría mecánico.
+y sonaría mecánico. Por la misma razón, el agente también suma ocasionalmente
+matices vocales cortos ("mmm...", "jajaja", "ahhh ya"; ver `agent.py` §
+EXPRESIONES HUMANAS Y MATICES VOCALES). El texto del LLM llega sin filtrar al
+TTS (sin limpieza de puntuación ni markdown), a propósito: los puntos
+suspensivos y comas son la señal que `deepgram/aura-2` usa para variar pausas
+y entonación.
 
 **RNF-2 — Voz fija.** La voz (`aura-2` / `celeste` / `es-CO`) es una decisión
 de producto ya tomada y aprobada. Ningún cambio futuro debe alterarla salvo
