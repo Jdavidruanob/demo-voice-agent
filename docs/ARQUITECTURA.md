@@ -88,6 +88,19 @@ la voz aprobada para la demo y no se toca bajo ningún motivo. Por eso está
 fija en `agent.py`, no en `.env` — para que nadie la cambie por accidente
 ajustando una variable de entorno.
 
+### Ruido de sala de fondo
+
+`agent.py:entrypoint` publica una **segunda pista de audio**, independiente
+de la voz del agente, con `livekit.agents.BackgroundAudioPlayer`: reproduce
+`assets/restaurant_ambience.wav` en loop a volumen muy bajo (`AMBIENCE_VOLUME
+= 0.04`) durante toda la llamada. No es un hack casero leyendo el `.wav` a
+mano — `BackgroundAudioPlayer` ya trae su propio `AudioSource`/
+`LocalAudioTrack`, decodifica y resamplea el archivo (soporta cualquier
+sample rate/canales de entrada), y se cierra solo con `ctx.add_shutdown_callback`
+cuando la llamada termina, incluso si termina de forma abrupta. Es puramente
+ambiental: no reacciona al estado del agente (a diferencia de
+`thinking_sound`, que este proyecto no usa).
+
 ## Estado del pedido: `session.userdata`, no un global
 
 `tools/orders.py` define:
@@ -199,6 +212,16 @@ por `console` o por `dev` + un cliente WebRTC (playground). Conectar un
 número real de Colombia (troncal con Claro/Movistar/Tigo, o portabilidad a un
 proveedor SIP) es trabajo pendiente, discutido pero no iniciado — ver
 `docs/SPEC.md` § Fuera de alcance.
+
+El agente tiene nombre formal: `@server.rtc_session(agent_name="agente-pollo")`
+en `agent.py`. Es el nombre que un dispatch rule de SIP necesitaría para
+enrutar una llamada real específicamente a este agente (paso previo útil para
+cuando se conecte la telefonía). **Efecto secundario importante:** fijar
+`agent_name` activa "explicit dispatch" en `livekit-agents` — las salas ya no
+disparan el agente automáticamente. `console` no se ve afectado (simula el
+job localmente), pero para probar por `dev` + Playground hay que indicar
+`agente-pollo` como agent name al conectarse, o el agente simplemente no
+entra a la sala.
 
 ## Variables de entorno
 

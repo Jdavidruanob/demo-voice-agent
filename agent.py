@@ -3,7 +3,16 @@ import os
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, room_io, inference
+from livekit.agents import (
+    Agent,
+    AgentServer,
+    AgentSession,
+    AudioConfig,
+    BackgroundAudioPlayer,
+    JobContext,
+    room_io,
+    inference,
+)
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import noise_cancellation, silero
 
@@ -53,6 +62,12 @@ APELLIDOS_A_RECONOCER = [
     "Yepes",
     "Zapata",
 ]
+
+# Ruido de sala de fondo en bucle (bandeja, murmullo de restaurante) para que
+# la llamada no suene a silencio digital perfecto. Volumen deliberadamente
+# bajo: nada que compita con la voz del TTS ni con el STT del cliente.
+AMBIENCE_AUDIO_PATH = "assets/restaurant_ambience.wav"
+AMBIENCE_VOLUME = 0.04
 
 SALUDO = "¡Hola! Bienvenido, soy el asistente de pedidos. ¿Qué le gustaría ordenar hoy?"
 if AVISO_LEGAL:
@@ -130,6 +145,60 @@ class Assistant(Agent):
               ("pollo" en vez de "Pollo Asado"). Di las cantidades en palabras y usa el
               nombre completo del producto, como lo diría una persona real (ej. "un Pollo
               Asado y una Coca-Cola", no "1 de pollo y 1 de gaseosa").
+            - Cuando la cantidad sea mayor a uno, pluraliza el nombre del producto en vez
+              de usar la muletilla "X de [producto]" (ej. "dos Coca-Colas", "tres
+              hamburguesas", "dos papas medianas"; nunca "2 de Coca-Cola" ni "2 de
+              hamburguesa"). Usa "X de [producto]" solo cuando sea gramaticalmente
+              indispensable porque el producto no se pluraliza solo de forma natural (ej.
+              "dos botellas de agua"), no como regla general.
+            - Al leer una lista de productos en voz alta (al agregar o al confirmar),
+              que suene como la diría una persona real por teléfono, no como una lectura
+              mecánica ítem por ítem: usa comas y "y" de forma natural entre los
+              productos.
+
+            TONO Y LATENCIA CONVERSACIONAL:
+            - No respondas siempre de forma instantánea y perfecta, como si fueras un
+              texto escrito. Cuando vayas a usar una herramienta (buscar un producto,
+              agregarlo, confirmar el pedido) o necesites "verificar" algo, puedes usar
+              una frase corta de transición antes, como lo haría una persona real
+              revisando algo (ej. "A ver, dame un segundo...", "Anota esto...", "Déjame
+              confirmo...", "Vale, dame un momento y lo reviso...", "Listo, a ver...").
+            - Varía la frase que uses; no repitas siempre la misma o suena artificial.
+            - Esto es ocasional, no en cada turno: úsalo de vez en cuando, no en cada
+              respuesta ni en respuestas simples y directas (ej. un saludo o un "sí,
+              claro" no necesitan transición). Si lo usas siempre deja de sonar natural
+              y se convierte en una muletilla mecánica, justo lo contrario de la idea.
+            - El objetivo es sonar cercano y conversacional, no robótico ni como un
+              texto perfectamente estructurado, pero tampoco dudoso o poco profesional.
+
+            EXPRESIONES HUMANAS Y MATICES VOCALES:
+            - Tu texto llega tal cual al TTS (sin filtrar puntuación), así que úsala con
+              intención: los puntos suspensivos y las comas son la señal que el TTS usa
+              para generar pausas y variaciones de entonación naturales. No las quites ni
+              escribas todo corrido sin puntuación.
+            - De vez en cuando, además de las frases de transición de arriba, suma un
+              matiz vocal corto y natural: "mmm..." al pensar o verificar algo, una risa
+              suave "jajaja" si el cliente dice algo gracioso o cordial, o una
+              exclamación corta como "ahhh ya" al caer en cuenta de algo (ej. "ahhh ya,
+              el combo familiar").
+            - Igual que las transiciones: es ocasional y variado, nunca en cada turno ni
+              combinado con una frase de transición en el mismo turno. Usarlo de más
+              suena forzado y poco profesional para una llamada de pedido real; un par de
+              veces en toda la conversación basta para sentirse humano sin distraer del
+              pedido.
+
+            ESCUCHA ACTIVA (BACKCHANNELING):
+            - Cuando te toque hablar y el cliente claramente sigue enumerando productos o
+              a mitad de una explicación (ej. hizo una pausa corta para pensar en el
+              siguiente ítem, no terminó una frase), no lances una pregunta ni una
+              respuesta larga: responde con un backchannel breve ("ajá", "sí", "listo",
+              "dale") que confirme que sigues escuchando, y deja que el cliente continúe.
+            - Reserva las respuestas completas (preguntas, confirmaciones, resúmenes) para
+              cuando el cliente realmente terminó de decir lo que quería.
+            - Nota técnica: esto no es audio superpuesto en tiempo real (el pipeline no lo
+              soporta hoy, ver docs/SPEC.md § Fuera de alcance); es que tu respuesta de
+              turno, cuando el corte de turno se sintió prematuro, sea mínima en vez de
+              tomarse la palabra por completo.
 
             PEDIDOS:
             - El menú de arriba ya lo conoces: para preguntas generales o por categoría
@@ -249,7 +318,7 @@ def _capturar_telefono_sip(session: AgentSession[PedidoEnCurso], room: rtc.Room)
 
 
 # The entrypoint function runs when a participant joins the room
-@server.rtc_session()
+@server.rtc_session(agent_name="agente-pollo")
 async def entrypoint(ctx: JobContext):
     # Una sola consulta a Postgres al arrancar la sesion, en vez de una
     # tool (get_menu) que el agente tendria que invocar y esperar en medio
@@ -270,7 +339,13 @@ async def entrypoint(ctx: JobContext):
             voice="celeste",
             language="es-CO",
         ),
-        vad=silero.VAD.load(),
+        # min_speech_duration y activation_threshold subidos del default (0.05s /
+        # 0.5) para que un ruido de fondo o una muletilla corta del cliente no
+        # corte el audio del agente a mitad de frase.
+        vad=silero.VAD.load(
+            min_speech_duration=0.35,
+            activation_threshold=0.6,
+        ),
         turn_handling={
             "turn_detection": turn_detection,
             "endpointing": endpointing,
@@ -295,6 +370,17 @@ async def entrypoint(ctx: JobContext):
             ),
         ),
     )
+
+    # Pista de audio de fondo independiente de la del agente: BackgroundAudioPlayer
+    # crea su propio AudioSource/LocalAudioTrack, publica en la sala y hace el loop
+    # del wav sin bloquear el event loop (decodifica y resamplea via ffmpeg/av).
+    # ctx.add_shutdown_callback asegura que se cierre y despublique al colgar,
+    # incluso si la llamada termina de forma abrupta.
+    background_audio = BackgroundAudioPlayer(
+        ambient_sound=AudioConfig(AMBIENCE_AUDIO_PATH, volume=AMBIENCE_VOLUME),
+    )
+    await background_audio.start(room=ctx.room, agent_session=session)
+    ctx.add_shutdown_callback(background_audio.aclose)
 
     _capturar_telefono_sip(session, ctx.room)
 
