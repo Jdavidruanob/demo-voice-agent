@@ -21,6 +21,8 @@ métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
 - Confirmar y persistir el pedido.
 - Sonar fluido: sin silencios muertos, sin cortes de turno torpes, primera
   respuesta instantánea.
+- Acceso desde un navegador (`web/`, ver RF-11), como alternativa a un número
+  de teléfono real: no rentaba montar troncal SIP solo para la demo.
 
 **Fuera de alcance (explícito, no es un olvido):**
 - Múltiples sedes/sucursales.
@@ -32,7 +34,9 @@ métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
 - Portal/dashboard para el restaurante (se discutió arquitectura — Postgres
   compartida entre agente y portal — pero no se construyó).
 - Conexión a un número de teléfono real (troncal SIP, portabilidad).
-  Discutido a fondo (ver hilo de decisiones más abajo) pero no iniciado.
+  Discutido a fondo (ver hilo de decisiones más abajo) pero no iniciado. El
+  acceso por web (RF-11) cubre el caso de uso de "hablar con el agente sin
+  depender de una línea telefónica" sin necesidad de este trabajo.
 - Multi-idioma. Solo español.
 - Backchanneling con audio real superpuesto (que el agente diga "ajá" con su
   propia voz *mientras* el cliente sigue hablando, sin cerrar su turno). El
@@ -109,6 +113,16 @@ confirmado y el cliente indica que no necesita nada más, el agente se
 despide y cierra la llamada (`finalizar_llamada`) en el mismo turno de la
 despedida, sin cortar el audio a mitad de frase. `finalizar_llamada` rechaza
 cerrar si todavía no hay ningún pedido confirmado en la llamada.
+
+**RF-11 — Acceso por web, sin número de teléfono.** Un cliente puede hablar
+con el agente desde el navegador (`web/`), sin necesidad de una línea
+telefónica ni troncal SIP: entra a una página, toca un botón para "llamar" y
+habla por el micrófono del dispositivo. Cada sesión web usa una sala nueva
+(un cliente no comparte sala con otro) y despacha el mismo agente
+(`agente-pollo`) que atiende por consola o, el día que se conecte, por
+teléfono — mismo pipeline STT/LLM/TTS, mismas tools, mismo `PedidoEnCurso`.
+Si el agente cuelga la llamada (RF-10), la página lo refleja y vuelve al
+estado de "colgado" sin que el cliente tenga que cerrar la pestaña.
 
 ## 4. Requisitos no funcionales
 
@@ -254,6 +268,10 @@ pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
 10. Después de confirmar, decir *"no, eso es todo, gracias"* → el agente se
     despide y, en el mismo turno, cierra la llamada (`finalizar_llamada`) sin
     cortar el audio de la despedida a mitad de frase.
+11. Abrir `web/static/index.html`, tocar "llamar" y repetir el guion 1-10
+    por el micrófono del navegador → mismo comportamiento que por consola;
+    al colgar el agente (escenario 10), la página vuelve sola al estado
+    "toca para llamar".
 
 La suite automática usada para verificar 4, 6, 7 y 8 contra Postgres real
 (sin voz) vive fuera del repo, en el scratchpad de la sesión que hizo el

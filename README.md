@@ -58,8 +58,12 @@ database/schema.sql      Tablas, índices trigram y productos de ejemplo
 tools/products.py        search_products, build_menu_prompt_block
 tools/orders.py          PedidoEnCurso + add_item_to_order, set_item_quantity,
                          vaciar_pedido, confirm_order
+tools/call.py            finalizar_llamada (cierra la llamada tras la despedida)
 scripts/bench_llm.py     Compara TTFT entre LLM candidatos con datos reales
 docker-compose.yml       Postgres 17 para desarrollo local
+Dockerfile               Imagen del worker del agente (para Railway u otro host)
+web/                     Interfaz web para hablar con el agente sin teléfono
+                         (main.py: FastAPI + token de LiveKit; static/: la página)
 ```
 
 ## Requisitos
@@ -113,6 +117,25 @@ uv run agent.py dev
 
 Con `dev`, conéctate desde cualquier cliente de LiveKit — por ejemplo el
 [Agents Playground](https://agents-playground.livekit.io) — usando el mismo proyecto.
+Como el agente usa despacho explícito (`agent_name="agente-pollo"`), indica
+ese nombre como agent name al conectarte desde el Playground, o el agente no
+entrará a la sala (ver `docs/ARQUITECTURA.md` § Telefonía).
+
+## Interfaz web (sin teléfono)
+
+`web/` es una página mínima + un backend FastAPI que emite tokens de LiveKit,
+para hablar con el agente desde el navegador sin necesidad de número de
+teléfono ni del Playground. Para probarla en local, con el agente corriendo
+en modo `dev` en otra terminal:
+
+```bash
+uv run --with fastapi --with "uvicorn[standard]" --with livekit-api --with python-dotenv \
+  uvicorn web.main:app --reload --port 8000
+```
+
+Abre `http://localhost:8000`, toca el botón de llamar y permite el micrófono.
+Para desplegar esto (agente + web) en producción de la forma más barata
+posible, ver [`docs/DEPLOY_RAILWAY.md`](docs/DEPLOY_RAILWAY.md).
 
 ## Latencia
 

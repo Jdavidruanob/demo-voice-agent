@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pollos Demo — Pide por voz</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --naranja: #e8590c;
+    --naranja-oscuro: #c74a09;
+    --rojo: #d9364a;
+    --fondo: #fff8f2;
+    --texto: #2b2018;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--fondo);
+    color: var(--texto);
+    padding: 24px;
+  }
+  .tarjeta {
+    width: 100%;
+    max-width: 420px;
+    background: #fff;
+    border-radius: 20px;
+    padding: 32px 28px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+    text-align: center;
+  }
+  .logo { font-size: 48px; line-height: 1; margin-bottom: 4px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.subtitulo { margin: 0 0 28px; color: #74675c; font-size: 14px; }
+
+  .boton-llamar {
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    border: none;
+    background: var(--naranja);
+    color: white;
+    font-size: 44px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto;
+    transition: transform 0.15s ease, background 0.2s ease;
+    box-shadow: 0 8px 24px rgba(232, 89, 12, 0.35);
+  }
+  .boton-llamar:hover { transform: scale(1.04); }
+  .boton-llamar:active { transform: scale(0.97); }
+  .boton-llamar.en-llamada {
+    background: var(--rojo);
+    box-shadow: 0 8px 24px rgba(217, 54, 74, 0.35);
+    animation: pulso 1.6s ease-in-out infinite;
+  }
+  .boton-llamar:disabled { opacity: 0.6; cursor: wait; animation: none; }
+
+  @keyframes pulso {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(217, 54, 74, 0.35); }
+    50% { box-shadow: 0 0 0 14px rgba(217, 54, 74, 0); }
+  }
+
+  .estado {
+    margin-top: 20px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #74675c;
+    min-height: 20px;
+  }
+  .estado.activo { color: var(--naranja-oscuro); }
+  .estado.error { color: var(--rojo); }
+
+  .ayuda {
+    margin-top: 24px;
+    font-size: 12px;
+    color: #a89a8c;
+    line-height: 1.5;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #1c1712; color: #f2e9e0; }
+    .tarjeta { background: #2a2119; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4); }
+    p.subtitulo, .estado, .ayuda { color: #b8a998; }
+  }
+</style>
+</head>
+<body>
+  <div class="tarjeta">
+    <div class="logo">🍗</div>
+    <h1>Pollos Demo</h1>
+    <p class="subtitulo">Pide por voz, directo desde el navegador</p>
+
+    <button id="botonLlamar" class="boton-llamar" aria-label="Llamar">📞</button>
+
+    <div id="estado" class="estado">Toca para llamar</div>
+
+    <div class="ayuda">
+      Vas a hablar con un asistente de voz. Permite el acceso al micrófono
+      cuando el navegador lo pida.
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+  <script>
+    const boton = document.getElementById("botonLlamar");
+    const estadoEl = document.getElementById("estado");
+
+    let room = null;
+    let enLlamada = false;
+
+    function setEstado(texto, clase) {
+      estadoEl.textContent = texto;
+      estadoEl.className = "estado" + (clase ? " " + clase : "");
+    }
+
+    function attachTrack(track) {
+      const el = track.attach();
+      el.dataset.lkAudio = "1";
+      document.body.appendChild(el);
+    }
+
+    function limpiarAudios() {
+      document.querySelectorAll("audio[data-lk-audio]").forEach((el) => el.remove());
+    }
+
+    async function iniciarLlamada() {
+      boton.disabled = true;
+      setEstado("Conectando…");
+
+      try {
+        const resp = await fetch("/api/token");
+        if (!resp.ok) throw new Error("token");
+        const { serverUrl, participantToken } = await resp.json();
+
+        const LK = LivekitClient;
+        room = new LK.Room();
+
+        room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === "audio") attachTrack(track);
+        });
+
+        // La sala es de un cliente + el agente: si el otro participante se
+        // va (incluido cuando el bot cuelga solo tras la despedida, ver
+        // tools/call.py), la llamada terminó para nosotros también.
+        room.on(LK.RoomEvent.ParticipantDisconnected, () => {
+          if (enLlamada) terminarLlamada();
+        });
+
+        room.on(LK.RoomEvent.Disconnected, () => {
+          if (enLlamada) terminarLlamada();
+        });
+
+        await room.connect(serverUrl, participantToken);
+        await room.localParticipant.setMicrophoneEnabled(true);
+
+        enLlamada = true;
+        boton.textContent = "🔴";
+        boton.classList.add("en-llamada");
+        boton.setAttribute("aria-label", "Colgar");
+        boton.disabled = false;
+        setEstado("En llamada — habla cuando quieras", "activo");
+      } catch (err) {
+        console.error(err);
+        setEstado("No se pudo conectar. Intenta de nuevo.", "error");
+        boton.disabled = false;
+      }
+    }
+
+    async function terminarLlamada() {
+      enLlamada = false;
+      boton.disabled = true;
+      if (room) {
+        try { await room.disconnect(); } catch (_) {}
+        room = null;
+      }
+      limpiarAudios();
+      boton.textContent = "📞";
+      boton.classList.remove("en-llamada");
+      boton.setAttribute("aria-label", "Llamar");
+      boton.disabled = false;
+      setEstado("Toca para llamar");
+    }
+
+    boton.addEventListener("click", () => {
+      if (enLlamada) {
+        terminarLlamada();
+      } else {
+        iniciarLlamada();
+      }
+    });
+  </script>
+</body>
+</html>

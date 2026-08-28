@@ -223,6 +223,40 @@ job localmente), pero para probar por `dev` + Playground hay que indicar
 `agente-pollo` como agent name al conectarse, o el agente simplemente no
 entra a la sala.
 
+## Interfaz web: hablar con el agente sin teléfono
+
+`web/` es un segundo servicio, independiente del agente (`agent.py`), pensado
+para desplegarse aparte (ver `docs/DEPLOY_RAILWAY.md`). Es deliberadamente
+mínimo: FastAPI + una sola página estática con JS plano y el SDK de
+`livekit-client` por CDN, sin build de frontend.
+
+```
+Navegador (web/static/index.html)
+    │  GET /api/token
+    ▼
+web/main.py (FastAPI)
+    - genera un room_name nuevo por llamada (pedido-xxxxxx)
+    - firma un AccessToken con RoomAgentDispatch(agent_name="agente-pollo")
+    ▼
+Navegador conecta por WebRTC directo a LiveKit Cloud con ese token
+    │
+    ▼
+LiveKit Cloud despacha el worker de agent.py a esa sala (mismo agente,
+mismo pipeline STT/LLM/TTS que por consola o teléfono)
+```
+
+El punto clave es `with_room_config(RoomConfiguration(agents=[RoomAgentDispatch(agent_name="agente-pollo")]))`
+dentro del propio token: como `@server.rtc_session(agent_name="agente-pollo")`
+usa despacho explícito (ver § Telefonía más abajo), sin esto la sala quedaría
+vacía. No hace falta ninguna llamada aparte a la API de LiveKit para crear el
+dispatch — viaja en el token, así que `web/main.py` no necesita mantener una
+sesión HTTP hacia LiveKit ni guardar estado: cada request a `/api/token` es
+independiente.
+
+`web/` no toca `PedidoEnCurso` ni Postgres directamente; solo mintea
+credenciales de sala. El estado del pedido lo sigue manejando por completo
+`agent.py`, igual que en consola o por teléfono.
+
 ## Variables de entorno
 
 | Variable | Default | Notas |
