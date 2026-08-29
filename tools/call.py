@@ -38,10 +38,15 @@ async def finalizar_llamada(ctx: RunContext[PedidoEnCurso]):
             ),
         }
 
-    # ctx.speech_handle es el habla del turno que disparo esta tool (la
-    # despedida), no una llamada global: esperar su reproduccion es lo que
-    # garantiza que el cliente ya la escucho completa antes de cortar.
-    await ctx.speech_handle.wait_for_playout()
+    # RunContext.wait_for_playout() (no SpeechHandle.wait_for_playout()) espera
+    # solo la reproduccion de lo que el agente dijo en este turno ANTES de
+    # invocar esta tool (la despedida), sin esperar a que la propia tool
+    # termine. Usar el de SpeechHandle aqui crearia una espera circular: esa
+    # tool es justamente lo que la libreria espera para dar por completo el
+    # turno, asi que esperar su propio handle desde dentro nunca resuelve
+    # (la version instalada de livekit-agents ya lo detecta y lo rechaza con
+    # un RuntimeError explicito).
+    await ctx.wait_for_playout()
     await asyncio.sleep(_MARGEN_CIERRE_SEGUNDOS)
 
     logger.info("[llamada] cerrando proceso tras confirmar pedido #%s", pedido.order_id)

@@ -145,6 +145,77 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 4. Si no conecta: revisa los logs de `agent-worker` (¿arrancó? ¿se conectó a
    Postgres?) y de `web` (¿el `/api/token` devuelve 200?), en ese orden.
 
+## Si pide micrófono pero no se escucha nada (diagnóstico)
+
+Este es el síntoma más confuso porque no tira un error visible: el botón de
+llamar funciona, el navegador pide el micrófono, `/api/token` responde `200`
+en los logs de `web`... y no pasa nada. Sigue estos pasos en orden — cada uno
+descarta una causa distinta:
+
+**1. Confirma que `/api/token` de verdad respondió 200 en el momento de la
+   llamada** (no un 200 viejo de otra carga de página). Si no hay una línea
+   `GET /api/token` justo cuando tocaste el botón, el problema está en el
+   frontend (revisa la consola del navegador, punto 4).
+
+**2. Revisa los logs de `agent-worker` buscando la línea `received job
+   request`** justo después de dar clic en llamar.
+   - Si **aparece** y luego hay un traceback: el agente sí fue despachado
+     pero crashea al arrancar (ejemplo real ya resuelto: `DB_PORT` apuntando
+     al host en vez de al puerto). Lee el traceback, es el caso más fácil de
+     depurar.
+   - Si **no aparece nada** (solo `initializing process` / `process
+     initialized` en bucle, sin `received job request`): el problema es que
+     LiveKit nunca despachó el agente a la sala. Sigue al punto 3.
+
+**3. Entra al dashboard de LiveKit Cloud** ([cloud.livekit.io](https://cloud.livekit.io)),
+   al proyecto cuya URL coincide con el `LIVEKIT_URL` configurado en Railway
+   (si manejas varios proyectos, es fácil confundirse de cuál es).
+   - Ve a la sección de **Sessions** (o **Rooms**, el nombre exacto depende
+     de la versión del dashboard) y confirma que se crea una sala nueva cada
+     vez que alguien toca el botón de llamar en la web. Si **no aparece
+     ninguna sala nueva**, el navegador no está llegando a este proyecto de
+     LiveKit — revisa `LIVEKIT_URL` en `web` (typo, proyecto equivocado, o
+     usando `wss://` de un proyecto viejo).
+   - Si la sala **sí se crea** pero el agente nunca entra, entra al detalle
+     de esa sala/sesión y mira los participantes: solo debería estar el
+     participante del navegador. Esto confirma que el despacho explícito
+     (`RoomAgentDispatch` con `agent_name="agente-pollo"`) no está
+     alcanzando a ningún worker — revisa el punto 4.
+   - Si el dashboard tiene alguna vista de **Agents/Workers** conectados,
+     confirma ahí que `agent-worker` aparece como conectado/en línea. Si no
+     aparece ninguno, el worker de Railway no está registrado contra este
+     proyecto (aunque sus logs digan `registered worker` — puede estar
+     registrado contra otro proyecto por credenciales equivocadas).
+
+**4. Verifica que las credenciales sean idénticas en los dos servicios de
+   Railway.** Abre **Variables** de `agent-worker` y de `web` lado a lado y
+   compara carácter por carácter: `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
+   `LIVEKIT_API_SECRET`. Deben apuntar exactamente al mismo proyecto de
+   LiveKit Cloud. Un error de copiado (key de un proyecto, secret de otro,
+   o una URL vieja) hace que la sala se cree en un proyecto y el worker esté
+   escuchando en otro — sin ningún error visible en ninguno de los dos
+   servicios.
+
+**5. Revisa la consola del navegador** (F12 → pestaña **Console**, y
+   **Network** filtrando por `WS`/`WebSocket`) justo al tocar el botón de
+   llamar:
+   - Un error al llamar `room.connect(...)` indica que el navegador no pudo
+     abrir la conexión WebRTC hacia `LIVEKIT_URL` (revisa que sea `wss://` y
+     no `ws://`, y que no haya un firewall/proxy corporativo bloqueando
+     WebRTC si estás probando desde una red de oficina).
+   - Si no hay errores y el estado de la sala se ve "conectado" desde el
+     navegador, el problema no es de la web sino del despacho del agente
+     (vuelve al punto 3).
+
+**6. Si todo lo anterior coincide (mismas credenciales, mismo proyecto, sala
+   se crea, worker registrado) y aun así no hay despacho:** confirma que el
+   `agent_name` sea *exactamente* igual en los dos lados —
+   `web/main.py:AGENT_NAME` y el `agent_name="..."` del decorador
+   `@server.rtc_session(...)` en `agent.py` — un espacio o mayúscula distinta
+   ya rompe el match. Si son iguales y sigue sin funcionar, es momento de
+   escribirle a soporte de LiveKit con el ID de la sala que no recibió
+   despacho (se ve en el dashboard, en el detalle de la sesión).
+
 ## Nota de seguridad para la demo
 
 El endpoint `/api/token` no tiene autenticación: cualquiera con el link
