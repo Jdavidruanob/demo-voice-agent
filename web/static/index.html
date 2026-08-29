@@ -377,6 +377,7 @@ finish review, the verdict, and DESIGN.md.
       boton.classList.remove("en-llamada", "conectando");
       boton.setAttribute("aria-label", "Llamar");
       boton.disabled = false;
+      ayudaEl.style.display = "";
       setEstado(yaLlamo ? "Toca para volver a llamar" : "Toca para hablar");
     }
 

@@ -110,8 +110,11 @@ fijos en esta demo, no un cálculo real de logística).
 
 **RF-10 — Cierre de llamada tras la despedida.** Una vez el pedido está
 confirmado y el cliente indica que no necesita nada más, el agente se
-despide y cierra la llamada (`finalizar_llamada`) en el mismo turno de la
-despedida, sin cortar el audio a mitad de frase. `finalizar_llamada` rechaza
+despide y cierra la llamada, sin cortar el audio a mitad de frase. La
+despedida no la dice el turno del LLM sino la propia `finalizar_llamada`,
+que la recibe como argumento (`despedida`): el modelo tiende a encadenar
+`confirm_order` → `finalizar_llamada` en un mismo turno sin hablar, y así el
+cliente se quedaba sin oír despedida alguna. `finalizar_llamada` rechaza
 cerrar si todavía no hay ningún pedido confirmado en la llamada.
 
 **RF-11 — Acceso por web, sin número de teléfono.** Un cliente puede hablar
@@ -210,13 +213,22 @@ Formato: nombre — precondición — postcondición — modo de fallo.
   transacción, el stock ya no alcanza — caso de carrera con otra llamada
   concurrente.
 
-**`finalizar_llamada()`**
+**`finalizar_llamada(despedida)`**
 - Precondición: `userdata.order_id` no es `None` (ya se confirmó un pedido en
   esta llamada).
-- Postcondición: espera a que termine de sonar el habla del turno que la
-  invocó (`ctx.speech_handle.wait_for_playout()`), agrega un colchón fijo de
-  0.3s, y termina el proceso (`os._exit(0)`). No hay retorno útil para el
-  agente: la llamada ya terminó.
+- Postcondición: dice `despedida` con `session.say()`, espera a que termine
+  de sonar (`wait_for_playout()`), agrega un colchón fijo de 1.5s y cierra la
+  sala (`job_ctx.delete_room()`). No hay retorno útil para el agente: la
+  llamada ya terminó.
+- El colchón existe porque `wait_for_playout()` resuelve cuando el audio se
+  entregó al servidor, no cuando el cliente terminó de oírlo: entre medio hay
+  red y el jitter buffer del navegador. Sin él, la despedida se corta al
+  final en una llamada por web (en consola no se nota, porque el audio sale
+  por el dispositivo local).
+- Cerrar la sala en vez de matar el proceso (`os._exit(0)`, como estaba
+  antes) es lo que hace que el navegador reciba `Disconnected` al instante y
+  su interfaz vuelva sola al estado inicial; matando el proceso, el cliente
+  se quedaba "en llamada" hasta que LiveKit notara el timeout.
 - Fallo: `{"success": False, "message": "..."}` si no hay ningún pedido
   confirmado todavía — no cierra nada en ese caso.
 
@@ -265,9 +277,10 @@ pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
 9. Al repetir nombre y dirección juntos, decir *"no, el nombre está mal, es
    [apellido]"* → el agente corrige el dato y vuelve a repetir la
    confirmación con el valor corregido, sin llamar a `confirm_order` todavía.
-10. Después de confirmar, decir *"no, eso es todo, gracias"* → el agente se
-    despide y, en el mismo turno, cierra la llamada (`finalizar_llamada`) sin
-    cortar el audio de la despedida a mitad de frase.
+10. Después de confirmar, el agente pregunta si necesita algo más (no cierra
+    la llamada en el mismo turno de `confirm_order`); al decir *"no, eso es
+    todo, gracias"* → se oye la despedida **completa** y solo entonces se
+    cierra la llamada.
 11. Abrir `web/static/index.html`, tocar "llamar" y repetir el guion 1-10
     por el micrófono del navegador → mismo comportamiento que por consola;
     al colgar el agente (escenario 10), la página vuelve sola al estado

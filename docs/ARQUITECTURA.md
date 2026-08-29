@@ -135,7 +135,7 @@ Esto importa por dos razones:
 | `set_item_quantity(product_id, quantity)` | Corrige la cantidad de un producto ya agregado; `quantity=0` lo quita | Igual que `add_item_to_order`, salvo cuando `quantity=0` |
 | `vaciar_pedido()` | Borra todo el pedido en curso sin tocar la base de datos | — |
 | `confirm_order(customer_name, delivery_address)` | Persiste el pedido: crea la fila en `orders`, una fila por item en `order_items`, descuenta stock, e informa un tiempo de entrega estimado (`eta_minutos`); deja `order_id` en `userdata` | `customer_name` y `delivery_address` no pueden llegar vacíos — es la tool, no el prompt, la que obliga a que el agente los haya preguntado antes. Revalida stock con `SELECT ... FOR UPDATE` dentro de la transacción (protege contra una carrera con otra llamada concurrente) |
-| `finalizar_llamada()` | Cierra el proceso de la llamada después de la despedida | Falla (sin cerrar nada) si `userdata.order_id` sigue en `None`, es decir, si no se confirmó ningún pedido en la llamada |
+| `finalizar_llamada(despedida)` | Dice la despedida en voz alta y luego cierra la sala (desconecta a todos) | Falla (sin cerrar nada) si `userdata.order_id` sigue en `None`, es decir, si no se confirmó ningún pedido en la llamada |
 
 Todas menos `search_products` reciben `ctx: RunContext[PedidoEnCurso]` como
 primer parámetro (LiveKit Agents lo inyecta automáticamente por tipo, no por
@@ -150,20 +150,38 @@ cliente corrige alguno de los dos, el agente actualiza y vuelve a confirmar.
 Esto es disciplina de prompt, no un contrato de la tool: `confirm_order`
 sigue aceptando el valor final que se le pase, tal como antes.
 
-Después de confirmar, si el cliente no necesita nada más, el agente se
-despide y llama a `finalizar_llamada` **en el mismo turno** en el que se
-despidió. La tool espera a que termine de sonar esa despedida
-(`ctx.speech_handle.wait_for_playout()`) y solo entonces hace `os._exit(0)`:
+Después de `confirm_order` el agente **no** cierra la llamada en ese mismo
+turno: informa el tiempo estimado y pregunta si el cliente necesita algo
+más. Solo cuando el cliente dice que no, llama a `finalizar_llamada`.
 
-- En `agent.py console`, esto termina el propio proceso — la terminal vuelve
-  al prompt de la shell sola, sin que el usuario tenga que cerrarla a mano.
-- En `dev`/producción, cada llamada corre en su propio subproceso
-  (`JobExecutorType.PROCESS`, el default de LiveKit Agents), así que esto
-  solo cuelga esa llamada puntual; el worker sigue atendiendo las demás.
+**La despedida la dice la tool, no el turno del LLM.** Se le pasa como
+argumento (`despedida`), y la tool hace `session.say(despedida)` y espera su
+reproducción antes de cerrar. Esto no es un rodeo: el modelo tiende a
+encadenar `confirm_order` → `finalizar_llamada` dentro de un mismo turno sin
+emitir texto, y entonces el cliente no oía despedida alguna (la despedida
+aparecía recién en el turno siguiente, que ya no ocurre porque la sala se
+cerró). Pasándola como argumento sigue siendo el modelo quien la redacta
+—natural y variada— pero ya no puede saltársela.
 
-Es una salida dura a propósito (no un apagado ordenado de sesión): se acepta
-porque ocurre después de que la respuesta ya se confirmó como guardada y de
-que el audio de la despedida ya terminó de sonar.
+Luego la tool espera un colchón fijo de 1.5s y cierra la sala con
+`job_ctx.delete_room()`. Los dos detalles importan y ambos se descubrieron
+fallando en una llamada web real:
+
+- **El colchón**: `wait_for_playout()` resuelve cuando el agente terminó de
+  *entregar* el audio al servidor, no cuando el cliente terminó de *oírlo*
+  (`AudioSource.wait_for_playout` espera a que se drene su cola). Entre medio
+  hay red y el jitter buffer del navegador. En consola no se nota, porque el
+  audio sale por el dispositivo local.
+- **Cerrar la sala en vez de matar el proceso**: antes esto era `os._exit(0)`,
+  que mataba el subproceso de la llamada sin avisarle al servidor. El
+  navegador se quedaba "en llamada" (micrófono activo, ondas de voz
+  moviéndose) hasta que LiveKit notara el timeout del participante.
+  `delete_room()` desconecta a todos los participantes, así que el cliente
+  recibe `Disconnected` al instante y la interfaz vuelve sola a su estado
+  inicial.
+
+En `agent.py console` no hay sala real que borrar: `delete_room()` lo
+detecta (`is_fake_job`) y no hace nada más que avisar en el log.
 
 ### Manejo de errores: `ToolError`, no excepciones genéricas
 

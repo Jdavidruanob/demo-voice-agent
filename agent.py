@@ -229,10 +229,14 @@ class Assistant(Agent):
             - Al confirmar, dile al cliente que su pedido llega en aproximadamente
               30 minutos (la tool ya te lo recuerda en su respuesta; repítelo con tus
               palabras).
-            - Después de confirmar, pregunta si necesita algo más. Si el cliente dice que
-              no, despídete cordialmente y, en ese MISMO turno, usa finalizar_llamada para
-              cerrar la llamada (no la llames antes de confirmar el pedido, ni en un turno
-              aparte después de ya haberte despedido).
+            - Después de usar confirm_order, NO cierres la llamada en ese mismo turno:
+              cuéntale al cliente que el pedido quedó confirmado, que llega en unos 30
+              minutos, y pregúntale si necesita algo más. Espera su respuesta.
+            - Solo cuando el cliente ya dijo que no necesita nada más, usa
+              finalizar_llamada pasándole en el argumento "despedida" la frase con la que
+              te despides (ej. "Muchas gracias por su pedido, que tenga un buen día").
+              Esa herramienta se encarga de decirla en voz alta y luego colgar, así que
+              no escribas la despedida además por tu cuenta: sonaría dos veces.
             - Si el cliente se corrige o cambia de opinión (ej. "quíteme la gaseosa",
               "mejor que sean tres", "cambie eso"), usa set_item_quantity con la
               cantidad final que debe quedar (0 para quitar el producto por completo).

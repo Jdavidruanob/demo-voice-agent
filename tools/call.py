@@ -1,30 +1,37 @@
 import asyncio
 import logging
-import os
 
-from livekit.agents import RunContext, function_tool
+from livekit.agents import RunContext, function_tool, get_job_context
 
 from tools.orders import PedidoEnCurso
 
 logger = logging.getLogger("agent")
 
-# Colchon de seguridad despues de wait_for_playout(), por si el dispositivo
-# de salida de audio tiene su propio buffer mas alla de lo que la libreria
-# reporta como "ya sono". No es una espera larga a proposito.
-_MARGEN_CIERRE_SEGUNDOS = 0.3
+# Margen despues de wait_for_playout() y antes de cerrar la sala.
+#
+# wait_for_playout() resuelve cuando el agente termino de ENTREGAR el audio al
+# servidor (AudioSource.wait_for_playout espera a que se drene su cola), no
+# cuando el cliente termino de OIRLO: entre medio hay red y el jitter buffer
+# del navegador, que van unos cientos de ms atras. Sin este margen la
+# despedida se corta justo al final en una llamada por web, aunque en consola
+# (donde el audio sale por el dispositivo local, sin red) se oiga completa.
+_MARGEN_CIERRE_SEGUNDOS = 1.5
 
 
 @function_tool
-async def finalizar_llamada(ctx: RunContext[PedidoEnCurso]):
-    """Cierra la llamada despues de despedirte del cliente.
+async def finalizar_llamada(ctx: RunContext[PedidoEnCurso], despedida: str):
+    """Dice tu despedida al cliente y cierra la llamada.
 
     Usa esta herramienta SOLO como el ultimo paso de la conversacion:
     despues de que el pedido ya se confirmo con confirm_order y el cliente
-    dijo explicitamente que no necesita nada mas. Di tu despedida en el
-    MISMO turno en el que llamas a esta herramienta (no la llames en un
-    turno aparte, despues de ya haberte despedido): la herramienta espera
-    a que termine de sonar tu despedida antes de cerrar la llamada, asi
-    que no hay riesgo de cortarte a mitad de frase.
+    dijo explicitamente que no necesita nada mas.
+
+    Args:
+        despedida: La frase completa con la que te despides, tal cual quieres
+            que el cliente la escuche (ej. "Listo, su pedido llega en unos 30
+            minutos. Muchas gracias por llamar, que tenga buen dia."). La dice
+            esta herramienta, asi que NO la digas ademas por tu cuenta: seria
+            decirla dos veces.
     """
 
     pedido = ctx.userdata
@@ -38,23 +45,38 @@ async def finalizar_llamada(ctx: RunContext[PedidoEnCurso]):
             ),
         }
 
-    # RunContext.wait_for_playout() (no SpeechHandle.wait_for_playout()) espera
-    # solo la reproduccion de lo que el agente dijo en este turno ANTES de
-    # invocar esta tool (la despedida), sin esperar a que la propia tool
-    # termine. Usar el de SpeechHandle aqui crearia una espera circular: esa
-    # tool es justamente lo que la libreria espera para dar por completo el
-    # turno, asi que esperar su propio handle desde dentro nunca resuelve
-    # (la version instalada de livekit-agents ya lo detecta y lo rechaza con
-    # un RuntimeError explicito).
-    await ctx.wait_for_playout()
+    # La despedida la dice la tool, no el turno del LLM, porque el modelo
+    # tiende a encadenar confirm_order -> finalizar_llamada en un mismo turno
+    # sin hablar: el cliente se quedaba sin oir despedida alguna. Pasandola
+    # como argumento sigue siendo el modelo quien la redacta (natural y
+    # variada), pero ya no puede saltarsela.
+    #
+    # El handle de say() es distinto del handle de esta tool, asi que
+    # esperarlo no crea la espera circular que si crearia
+    # ctx.speech_handle.wait_for_playout().
+    handle = ctx.session.say(despedida)
+    await handle.wait_for_playout()
     await asyncio.sleep(_MARGEN_CIERRE_SEGUNDOS)
 
-    logger.info("[llamada] cerrando proceso tras confirmar pedido #%s", pedido.order_id)
+    try:
+        job_ctx = get_job_context()
+    except RuntimeError:
+        # Fuera de un job (por ejemplo en una prueba que instancia la sesion
+        # a mano) no hay sala que cerrar: la despedida ya se dijo, que es lo
+        # que importa.
+        logger.warning("[llamada] sin JobContext: no hay sala que cerrar")
+        return None
 
-    # Salida dura a proposito, no un apagado ordenado de la sesion:
-    # - En `agent.py console`, termina el propio proceso, que es justo lo
-    #   que se pidio (que la terminal se cierre sola al despedirse).
-    # - En `dev`/produccion cada llamada corre en su propio subproceso
-    #   (JobExecutorType.PROCESS por defecto de LiveKit Agents), asi que
-    #   esto solo cuelga ESA llamada; el worker sigue atendiendo las demas.
-    os._exit(0)
+    logger.info("[llamada] cerrando la sala tras confirmar pedido #%s", pedido.order_id)
+
+    # Cerrar la sala, no matar el proceso. delete_room desconecta a todos los
+    # participantes, asi que el navegador recibe el evento Disconnected al
+    # instante y su interfaz vuelve sola al estado inicial.
+    #
+    # Antes esto era os._exit(0), y tenia dos problemas en una llamada real
+    # por web: cortaba el final de la despedida que todavia iba en camino, y
+    # mataba el subproceso sin avisarle al servidor, asi que el navegador se
+    # quedaba "en llamada" (mostrando el micro activo) hasta que LiveKit
+    # notara el timeout del participante.
+    await job_ctx.delete_room()
+    return None
