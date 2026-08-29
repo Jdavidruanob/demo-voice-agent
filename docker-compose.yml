@@ -1,12 +1,12 @@
 services:
   postgres:
     image: postgres:17
-    container_name: chicken-postgres
+    container_name: hotel-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: password
-      POSTGRES_DB: chicken_store
+      POSTGRES_DB: hotel_reservas
     ports:
       # El puerto del host se toma de DB_PORT en el .env (por defecto 5432),
       # para poder convivir con otras Postgres corriendo en la maquina.

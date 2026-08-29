@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #15100c;
+  --char: #241b14;
+  --paper: #f3e9d8;
+  --paprika: #e4572e;
+  --mustard: #f2a93b;
+  --smoke: #9c8a78;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-char: var(--char);
+  --color-paper: var(--paper);
+  --color-paprika: var(--paprika);
+  --color-mustard: var(--mustard);
+  --color-smoke: var(--smoke);
+  --font-display: var(--font-oswald);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-plex-mono);
+}
+
+body {
+  background: radial-gradient(120% 140% at 50% -10%, #2c2117 0%, var(--ink) 55%);
+  color: var(--paper);
+  min-height: 100%;
+}
+
+/* Textura sutil de "papel térmico" detrás de la tarjeta — el único guiño
+   decorativo del diseño, a propósito discreto (ver frontend-design skill:
+   un solo riesgo estético, ejecutado con contención). */
+.ticket-texture {
+  background-image: radial-gradient(rgba(243, 233, 216, 0.05) 1px, transparent 1px);
+  background-size: 14px 14px;
+}
+
+/* BarVisualizer de @livekit/components-react: reskin de sus clases lk-*
+   para que la onda use la paleta de la app en vez del azul por defecto. */
+.call-console .lk-audio-bar {
+  background-color: rgba(243, 233, 216, 0.12);
+  border-radius: 3px;
+  transition: background 0.15s ease;
+}
+
+.call-console .lk-audio-bar.lk-highlighted {
+  background-image: linear-gradient(180deg, var(--mustard), var(--paprika));
+}

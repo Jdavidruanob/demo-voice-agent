@@ -18,7 +18,7 @@ async def create_pool() -> asyncpg.Pool:
         _pool = await asyncpg.create_pool(
             user=os.getenv("DB_USER", "admin"),
             password=os.getenv("DB_PASSWORD", "password"),
-            database=os.getenv("DB_NAME", "chicken_store"),
+            database=os.getenv("DB_NAME", "hotel_reservas"),
             host=os.getenv("DB_HOST", "localhost"),
             port=int(os.getenv("DB_PORT", "5432")),
         )
