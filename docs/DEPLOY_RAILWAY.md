@@ -91,8 +91,9 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 ## 2. Desplegar el worker del agente
 
 1. En el mismo proyecto: **New** → **GitHub Repo** → selecciona
-   `demo-voice-agent` → rama **`feat/demo-fluidez`** (ahí ya está todo lo
-   fusionado; no despliegues `llamada-activada` ni `main`).
+   `demo-voice-agent` → rama **`pedidos`** (ahí está la demo de toma de
+   pedidos, ya con todo fusionado; `main` es el código original y `reservas`
+   es la otra demo, que va en su propio proyecto de Railway).
 2. Railway detecta el `Dockerfile` de la raíz automáticamente (Root
    Directory = `/`, el default). No hace falta tocar el build.
 3. Ve a **Variables** de este servicio y agrega:
@@ -122,7 +123,7 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 ## 3. Desplegar la interfaz web
 
 1. En el mismo proyecto: **New** → **GitHub Repo** → mismo repo, misma rama
-   `feat/demo-fluidez`, pero esta vez en **Settings** de ese servicio pon
+   `pedidos`, pero esta vez en **Settings** de ese servicio pon
    **Root Directory = `web`**. Railway usará `web/Dockerfile`.
 2. Variables de este servicio (son las únicas tres que necesita):
    ```

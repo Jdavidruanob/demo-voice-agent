@@ -1,10 +1,16 @@
 # Arquitectura y estado actual
 
 Este documento describe **cómo funciona el sistema tal como está en esta rama
-(`feat/demo-fluidez`)**, para que cualquiera que retome el proyecto — humano o
-agente — entienda el estado real sin tener que releer todo el código. La rama
-`main` es la versión anterior, sin las optimizaciones de fluidez ni las
-correcciones de bugs descritas aquí.
+(`pedidos`)**, para que cualquiera que retome el proyecto — humano o
+agente — entienda el estado real sin tener que releer todo el código.
+
+El repo tiene tres ramas y cada una es una cosa distinta:
+
+| Rama | Qué es |
+|---|---|
+| `main` | La versión original, sin las optimizaciones de fluidez ni las correcciones de bugs descritas aquí. |
+| `pedidos` | Esta rama: la demo de toma de pedidos de un restaurante de pollo. |
+| `reservas` | La demo de reservas de hotel, con la misma arquitectura y la misma interfaz web (en azul). |
 
 ## Qué es esto
 
