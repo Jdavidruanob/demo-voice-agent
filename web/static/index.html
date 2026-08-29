@@ -1,125 +1,289 @@
 <!doctype html>
 <html lang="es">
 <head>
+<!--
+THESIS: Un instrumento reactivo a la voz, no un formulario: toda la pantalla
+es un solo círculo con el que hablas, sin las convenciones de card/chat-widget.
+OWN-WORLD: fondo casi negro con tinte cálido, un único acento ámbar apagado,
+un anillo de barras de audio en vivo como único "ícono"; el texto en pantalla
+es la única marca ("Demo").
+STORY: el visitante ve un círculo, lo toca, ve/oye al agente escuchar y
+responder mediante barras reactivas al audio real, y lo vuelve a tocar o
+espera a que el agente se despida solo para colgar.
+FIRST VIEWPORT: columna centrada a pantalla completa sobre fondo plano
+oscuro — etiqueta "DEMO" diminuta arriba, el círculo-instrumento al centro
+(~45% del viewport, máx 232px), una línea de estado debajo, nada más.
+FORM: pedido acotado y precisado por el usuario (oscuro, sin neón, onda tipo
+LiveKit, solo "Demo") — se construyó directo, sin torneo de conceptos.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the
+finish review, the verdict, and DESIGN.md.
+-->
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Pollos Demo — Pide por voz</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0a0c" />
+<title>Asistente de Voz — Demo</title>
+<meta name="description" content="Prueba el asistente de voz directo desde el navegador, sin necesidad de teléfono." />
+<meta property="og:title" content="Asistente de Voz — Demo" />
+<meta property="og:description" content="Prueba el asistente de voz directo desde el navegador, sin necesidad de teléfono." />
+<meta property="og:type" content="website" />
 <style>
   :root {
-    color-scheme: light dark;
-    --naranja: #e8590c;
-    --naranja-oscuro: #c74a09;
-    --rojo: #d9364a;
-    --fondo: #fff8f2;
-    --texto: #2b2018;
+    color-scheme: dark;
+    --bg: #0a0a0c;
+    --circulo: #16161a;
+    --circulo-borde: rgba(255, 255, 255, 0.08);
+    --ink: #f2efe9;
+    --ink-tenue: #938d84;
+    --ink-debil: #514c46;
+    --acento: #c98a4a;
+    --acento-suave: rgba(201, 138, 74, 0.4);
+    --error: #b56a55;
   }
+
   * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    overscroll-behavior: none;
+  }
+
   body {
     margin: 0;
-    min-height: 100vh;
+    min-height: 100dvh;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    background: var(--fondo);
-    color: var(--texto);
-    padding: 24px;
+    gap: clamp(28px, 6vh, 48px);
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    padding: env(safe-area-inset-top, 24px) env(safe-area-inset-right, 24px)
+      env(safe-area-inset-bottom, 24px) env(safe-area-inset-left, 24px);
+    -webkit-font-smoothing: antialiased;
   }
-  .tarjeta {
-    width: 100%;
-    max-width: 420px;
-    background: #fff;
-    border-radius: 20px;
-    padding: 32px 28px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
-    text-align: center;
+
+  ::selection { background: var(--acento); color: #0a0a0c; }
+
+  :focus-visible {
+    outline: 2px solid var(--acento);
+    outline-offset: 4px;
+    border-radius: 4px;
   }
-  .logo { font-size: 48px; line-height: 1; margin-bottom: 4px; }
-  h1 { font-size: 22px; margin: 0 0 4px; }
-  p.subtitulo { margin: 0 0 28px; color: #74675c; font-size: 14px; }
+
+  .marca {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.32em;
+    text-transform: uppercase;
+    color: var(--ink-debil);
+  }
+
+  .instrumento {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: clamp(20px, 4vh, 28px);
+  }
 
   .boton-llamar {
-    width: 120px;
-    height: 120px;
+    position: relative;
+    width: clamp(176px, 44vw, 232px);
+    height: clamp(176px, 44vw, 232px);
     border-radius: 50%;
-    border: none;
-    background: var(--naranja);
-    color: white;
-    font-size: 44px;
+    border: 1px solid var(--circulo-borde);
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255, 255, 255, 0.05), transparent 60%),
+      var(--circulo);
+    box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.65);
     cursor: pointer;
+    padding: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    margin: 0 auto;
-    transition: transform 0.15s ease, background 0.2s ease;
-    box-shadow: 0 8px 24px rgba(232, 89, 12, 0.35);
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.4s ease;
   }
-  .boton-llamar:hover { transform: scale(1.04); }
-  .boton-llamar:active { transform: scale(0.97); }
-  .boton-llamar.en-llamada {
-    background: var(--rojo);
-    box-shadow: 0 8px 24px rgba(217, 54, 74, 0.35);
-    animation: pulso 1.6s ease-in-out infinite;
-  }
-  .boton-llamar:disabled { opacity: 0.6; cursor: wait; animation: none; }
 
-  @keyframes pulso {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(217, 54, 74, 0.35); }
-    50% { box-shadow: 0 0 0 14px rgba(217, 54, 74, 0); }
+  .boton-llamar::before {
+    content: "";
+    position: absolute;
+    inset: -9px;
+    border-radius: 50%;
+    border: 1.5px solid var(--acento-suave);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+  }
+
+  .boton-llamar.en-llamada::before { opacity: 1; }
+
+  .boton-llamar.conectando::before {
+    opacity: 1;
+    border-style: dashed;
+    animation: girar 2.4s linear infinite;
+  }
+
+  @keyframes girar {
+    to { transform: rotate(360deg); }
+  }
+
+  .boton-llamar:hover { transform: scale(1.03); }
+  .boton-llamar:active { transform: scale(0.97); }
+  .boton-llamar:disabled { cursor: wait; }
+
+  .barras {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: clamp(5px, 1.4vw, 7px);
+    height: 40%;
+    pointer-events: none;
+  }
+
+  .barra {
+    width: clamp(5px, 1.4vw, 7px);
+    border-radius: 999px;
+    background: var(--ink-debil);
+    height: 14%;
+    will-change: height, background-color;
   }
 
   .estado {
-    margin-top: 20px;
-    font-size: 14px;
-    font-weight: 600;
-    color: #74675c;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--ink-tenue);
+    text-align: center;
     min-height: 20px;
+    transition: color 0.3s ease;
   }
-  .estado.activo { color: var(--naranja-oscuro); }
-  .estado.error { color: var(--rojo); }
+
+  .estado.error { color: var(--error); }
 
   .ayuda {
-    margin-top: 24px;
-    font-size: 12px;
-    color: #a89a8c;
+    font-size: 11px;
+    color: var(--ink-debil);
+    text-align: center;
+    max-width: 260px;
     line-height: 1.5;
   }
 
-  @media (prefers-color-scheme: dark) {
-    body { background: #1c1712; color: #f2e9e0; }
-    .tarjeta { background: #2a2119; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4); }
-    p.subtitulo, .estado, .ayuda { color: #b8a998; }
+  @media (prefers-reduced-motion: reduce) {
+    .boton-llamar, .barra { transition: none; }
+    .boton-llamar.conectando::before { animation: none; }
   }
 </style>
 </head>
 <body>
-  <div class="tarjeta">
-    <div class="logo">🍗</div>
-    <h1>Pollos Demo</h1>
-    <p class="subtitulo">Pide por voz, directo desde el navegador</p>
+  <div class="marca">Demo</div>
 
-    <button id="botonLlamar" class="boton-llamar" aria-label="Llamar">📞</button>
+  <div class="instrumento">
+    <button id="botonLlamar" class="boton-llamar" aria-label="Llamar" type="button">
+      <div class="barras" aria-hidden="true">
+        <span class="barra"></span>
+        <span class="barra"></span>
+        <span class="barra"></span>
+        <span class="barra"></span>
+        <span class="barra"></span>
+        <span class="barra"></span>
+        <span class="barra"></span>
+      </div>
+    </button>
 
-    <div id="estado" class="estado">Toca para llamar</div>
-
-    <div class="ayuda">
-      Vas a hablar con un asistente de voz. Permite el acceso al micrófono
-      cuando el navegador lo pida.
-    </div>
+    <div id="estado" class="estado">Toca para hablar</div>
   </div>
+
+  <p id="ayuda" class="ayuda">Se te pedirá acceso al micrófono.</p>
 
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
   <script>
     const boton = document.getElementById("botonLlamar");
     const estadoEl = document.getElementById("estado");
+    const ayudaEl = document.getElementById("ayuda");
+    const barraEls = Array.from(document.querySelectorAll(".barra"));
+
+    const COLOR_TENUE = [81, 76, 70];   // --ink-debil, reposo
+    const COLOR_TU = [242, 239, 233];   // --ink, cuando tú hablas
+    const COLOR_AGENTE = [201, 138, 74]; // --acento, cuando el agente habla
 
     let room = null;
-    let enLlamada = false;
+    let modo = "idle"; // idle | conectando | llamada
+    let audioCtx = null;
+    let obtenerNivelLocal = null;
+    let obtenerNivelRemoto = null;
+    let yaLlamo = false;
+
+    // Estado suavizado por barra, para que el movimiento se vea organico y
+    // no salte con cada frame de datos crudos del analizador.
+    const alturas = new Array(barraEls.length).fill(0.14);
+    const colores = barraEls.map(() => [...COLOR_TENUE]);
+    const FASE = [0, 0.9, 1.7, 2.6, 3.4, 4.3, 5.1];
+    const VELOCIDAD = [1.3, 1.7, 1.1, 1.9, 1.4, 1.6, 1.2];
 
     function setEstado(texto, clase) {
       estadoEl.textContent = texto;
       estadoEl.className = "estado" + (clase ? " " + clase : "");
     }
+
+    function mezclarColor(a, b, t) {
+      return [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
+    }
+
+    function crearAnalizador(mediaStreamTrack) {
+      const stream = new MediaStream([mediaStreamTrack]);
+      const fuente = audioCtx.createMediaStreamSource(stream);
+      const analizador = audioCtx.createAnalyser();
+      analizador.fftSize = 256;
+      analizador.smoothingTimeConstant = 0.7;
+      fuente.connect(analizador);
+      const datos = new Uint8Array(analizador.frequencyBinCount);
+      return () => {
+        analizador.getByteFrequencyData(datos);
+        let suma = 0;
+        for (let i = 0; i < datos.length; i++) suma += datos[i];
+        return suma / datos.length / 255;
+      };
+    }
+
+    function circuloPx() {
+      return boton.getBoundingClientRect().height;
+    }
+
+    function dibujarFrame(t) {
+      const size = circuloPx();
+      const base = size * 0.08;
+      const extra = size * 0.32;
+      const segundos = t / 1000;
+
+      const nivelLocal = modo === "llamada" && obtenerNivelLocal ? obtenerNivelLocal() : 0;
+      const nivelRemoto = modo === "llamada" && obtenerNivelRemoto ? obtenerNivelRemoto() : 0;
+      const hablaAgente = nivelRemoto > nivelLocal;
+      const nivelDominante = Math.max(nivelLocal, nivelRemoto);
+
+      for (let i = 0; i < barraEls.length; i++) {
+        const onda = 0.55 + 0.45 * Math.sin(segundos * VELOCIDAD[i] + FASE[i]);
+        let objetivoAltura;
+        let colorObjetivo;
+
+        if (modo === "llamada" && nivelDominante > 0.03) {
+          objetivoAltura = 0.14 + Math.min(nivelDominante * 2.4, 1) * onda;
+          colorObjetivo = hablaAgente ? COLOR_AGENTE : COLOR_TU;
+        } else {
+          // Reposo: respiracion suave y lenta, para que el circulo se sienta
+          // vivo antes de la primera llamada y entre llamadas.
+          objetivoAltura = 0.1 + 0.05 * (0.5 + 0.5 * Math.sin(segundos * 0.6 + FASE[i]));
+          colorObjetivo = COLOR_TENUE;
+        }
+
+        alturas[i] += (objetivoAltura - alturas[i]) * 0.18;
+        colores[i] = mezclarColor(colores[i], colorObjetivo, 0.12);
+
+        const px = base + alturas[i] * extra;
+        barraEls[i].style.height = px + "px";
+        barraEls[i].style.background = `rgb(${colores[i][0]}, ${colores[i][1]}, ${colores[i][2]})`;
+      }
+
+      requestAnimationFrame(dibujarFrame);
+    }
+    requestAnimationFrame(dibujarFrame);
 
     function attachTrack(track) {
       const el = track.attach();
@@ -131,8 +295,18 @@
       document.querySelectorAll("audio[data-lk-audio]").forEach((el) => el.remove());
     }
 
+    function pistaLocalDeAudio(room) {
+      const publicaciones = room.localParticipant.trackPublications || room.localParticipant.tracks;
+      for (const pub of publicaciones.values()) {
+        if (pub.kind === "audio" && pub.track) return pub.track;
+      }
+      return null;
+    }
+
     async function iniciarLlamada() {
       boton.disabled = true;
+      modo = "conectando";
+      boton.classList.add("conectando");
       setEstado("Conectando…");
 
       try {
@@ -142,57 +316,74 @@
 
         const LK = LivekitClient;
         room = new LK.Room();
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
         room.on(LK.RoomEvent.TrackSubscribed, (track) => {
-          if (track.kind === "audio") attachTrack(track);
+          if (track.kind !== "audio") return;
+          attachTrack(track);
+          obtenerNivelRemoto = crearAnalizador(track.mediaStreamTrack);
         });
 
         // La sala es de un cliente + el agente: si el otro participante se
         // va (incluido cuando el bot cuelga solo tras la despedida, ver
-        // tools/call.py), la llamada terminó para nosotros también.
+        // tools/call.py), la llamada termino para nosotros tambien.
         room.on(LK.RoomEvent.ParticipantDisconnected, () => {
-          if (enLlamada) terminarLlamada();
+          if (modo === "llamada") terminarLlamada();
         });
 
         room.on(LK.RoomEvent.Disconnected, () => {
-          if (enLlamada) terminarLlamada();
+          if (modo === "llamada") terminarLlamada();
         });
 
         await room.connect(serverUrl, participantToken);
         await room.localParticipant.setMicrophoneEnabled(true);
 
-        enLlamada = true;
-        boton.textContent = "🔴";
+        const pistaLocal = pistaLocalDeAudio(room);
+        if (pistaLocal) obtenerNivelLocal = crearAnalizador(pistaLocal.mediaStreamTrack);
+
+        modo = "llamada";
+        yaLlamo = true;
+        boton.classList.remove("conectando");
         boton.classList.add("en-llamada");
         boton.setAttribute("aria-label", "Colgar");
         boton.disabled = false;
-        setEstado("En llamada — habla cuando quieras", "activo");
+        ayudaEl.style.display = "none";
+        setEstado("En llamada — habla cuando quieras");
       } catch (err) {
         console.error(err);
+        modo = "idle";
+        boton.classList.remove("conectando");
         setEstado("No se pudo conectar. Intenta de nuevo.", "error");
         boton.disabled = false;
       }
     }
 
     async function terminarLlamada() {
-      enLlamada = false;
+      modo = "idle";
       boton.disabled = true;
+      obtenerNivelLocal = null;
+      obtenerNivelRemoto = null;
+
       if (room) {
         try { await room.disconnect(); } catch (_) {}
         room = null;
       }
+      if (audioCtx) {
+        try { await audioCtx.close(); } catch (_) {}
+        audioCtx = null;
+      }
       limpiarAudios();
-      boton.textContent = "📞";
-      boton.classList.remove("en-llamada");
+
+      boton.classList.remove("en-llamada", "conectando");
       boton.setAttribute("aria-label", "Llamar");
       boton.disabled = false;
-      setEstado("Toca para llamar");
+      setEstado(yaLlamo ? "Toca para volver a llamar" : "Toca para hablar");
     }
 
     boton.addEventListener("click", () => {
-      if (enLlamada) {
+      if (modo === "llamada") {
         terminarLlamada();
-      } else {
+      } else if (modo === "idle") {
         iniciarLlamada();
       }
     });
