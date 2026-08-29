@@ -3,7 +3,7 @@ import logging
 
 from livekit.agents import RunContext, function_tool, get_job_context
 
-from tools.orders import PedidoEnCurso
+from tools.reservas import ReservaEnCurso
 
 logger = logging.getLogger("agent")
 
@@ -19,34 +19,34 @@ _MARGEN_CIERRE_SEGUNDOS = 1.5
 
 
 @function_tool
-async def finalizar_llamada(ctx: RunContext[PedidoEnCurso], despedida: str):
+async def finalizar_llamada(ctx: RunContext[ReservaEnCurso], despedida: str):
     """Dice tu despedida al cliente y cierra la llamada.
 
     Usa esta herramienta SOLO como el ultimo paso de la conversacion:
-    despues de que el pedido ya se confirmo con confirm_order y el cliente
+    despues de que la reserva ya se guardo con crear_reserva y el cliente
     dijo explicitamente que no necesita nada mas.
 
     Args:
         despedida: La frase completa con la que te despides, tal cual quieres
-            que el cliente la escuche (ej. "Listo, su pedido llega en unos 30
-            minutos. Muchas gracias por llamar, que tenga buen dia."). La dice
-            esta herramienta, asi que NO la digas ademas por tu cuenta: seria
-            decirla dos veces.
+            que el cliente la escuche (ej. "Listo, lo esperamos el 10 de
+            septiembre. Muchas gracias por llamar, que tenga buen dia."). La
+            dice esta herramienta, asi que NO la digas ademas por tu cuenta:
+            seria decirla dos veces.
     """
 
-    pedido = ctx.userdata
+    reserva = ctx.userdata
 
-    if pedido.order_id is None:
+    if reserva.reserva_id is None:
         return {
             "success": False,
             "message": (
-                "Todavia no se ha confirmado ningun pedido en esta llamada. "
+                "Todavia no se ha confirmado ninguna reserva en esta llamada. "
                 "No cierres la llamada todavia."
             ),
         }
 
     # La despedida la dice la tool, no el turno del LLM, porque el modelo
-    # tiende a encadenar confirm_order -> finalizar_llamada en un mismo turno
+    # tiende a encadenar crear_reserva -> finalizar_llamada en un mismo turno
     # sin hablar: el cliente se quedaba sin oir despedida alguna. Pasandola
     # como argumento sigue siendo el modelo quien la redacta (natural y
     # variada), pero ya no puede saltarsela.
@@ -67,7 +67,7 @@ async def finalizar_llamada(ctx: RunContext[PedidoEnCurso], despedida: str):
         logger.warning("[llamada] sin JobContext: no hay sala que cerrar")
         return None
 
-    logger.info("[llamada] cerrando la sala tras confirmar pedido #%s", pedido.order_id)
+    logger.info("[llamada] cerrando la sala tras confirmar la reserva #%s", reserva.reserva_id)
 
     # Cerrar la sala, no matar el proceso. delete_room desconecta a todos los
     # participantes, asi que el navegador recibe el evento Disconnected al

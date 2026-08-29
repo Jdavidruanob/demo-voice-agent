@@ -1,13 +1,20 @@
-# Demo — Agente de voz para tomar pedidos
+# Demo — Agente de voz para reservas de hotel
 
 Agente de voz construido con [LiveKit Agents](https://docs.livekit.io/agents/) que atiende
-llamadas de una cadena de restaurantes de pollo: escucha al cliente en español, consulta el
-menú en Postgres, arma el pedido y lo guarda cuando el cliente lo confirma.
+llamadas de recepción de un hotel: escucha al cliente en español, consulta disponibilidad y
+tarifas en Postgres, y guarda la reserva cuando el cliente confirma.
 
 > **Documentación completa:** [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) describe el
 > estado actual del sistema y por qué está construido así; [`docs/SPEC.md`](docs/SPEC.md)
 > es el spec del producto — qué debe cumplir el sistema, contratos de cada tool y
-> criterios de aceptación. Este README es la puesta en marcha rápida.
+> criterios de aceptación; [`docs/DEPLOY_RAILWAY.md`](docs/DEPLOY_RAILWAY.md) es la guía
+> para ponerlo en línea. Este README es la puesta en marcha rápida.
+
+> **Ramas del repo:** `main` es el código original; `pedidos` es la demo de toma de
+> pedidos de un restaurante de pollo; `reservas` (esta rama) es la demo de reservas de
+> hotel. `pedidos` y `reservas` comparten arquitectura, interfaz web y todas las
+> optimizaciones de fluidez: solo cambia el dominio de negocio y el color de la
+> interfaz.
 
 ## Cómo funciona
 
@@ -21,11 +28,9 @@ LiveKit Inference ──  STT: deepgram/flux-general-multi (transcribe Y detecta
     │
     ▼
 Assistant (agent.py) ── function tools ──▶ Postgres
-                          search_products
-                          add_item_to_order
-                          set_item_quantity
-                          vaciar_pedido
-                          confirm_order
+                          consultar_disponibilidad
+                          crear_reserva
+                          finalizar_llamada  (dice la despedida y cuelga)
 ```
 
 Detalles de la conversación, pensados para que fluya como una llamada real y no
@@ -37,34 +42,60 @@ como un intercambio de turnos con pausas:
   vía `STT_MODEL` si Flux no convence en español-CO (ver `agent.py:_build_turn_pipeline`).
 - **`preemptive_tts` activo**: la síntesis de voz arranca antes de que el turno se
   confirme del todo, escondiendo buena parte de la latencia de la voz sin tocarla.
-- **Saludo instantáneo** con `session.say()` (sin pasar por el LLM) y **menú inyectado en
-  el prompt** al arrancar la sesión: la lista de productos ya no es una tool que el agente
-  tenga que invocar y esperar a mitad de llamada.
-- **Fillers**: si `search_products` tarda más de 0.6s, el agente dice "dame un momento,
-  reviso..." en vez de dejar un silencio muerto.
+- **Saludo instantáneo** con `session.say()` (sin pasar por el LLM) y **catálogo de tipos
+  de habitación inyectado en el prompt** al arrancar la sesión: sirve para responder
+  precio/capacidad sin gastar un roundtrip de tool. La disponibilidad real para fechas
+  concretas siempre pasa por `consultar_disponibilidad`.
+- **Fillers**: si una consulta a Postgres tarda más de 0.6s, el agente dice "a ver, reviso
+  disponibilidad..." en vez de dejar un silencio muerto.
 - **VAD** con Silero y **cancelación de ruido** BVC, pensado para audio de teléfono.
-- **Búsqueda tolerante a errores**: `search_products` usa la extensión `pg_trgm` de
-  Postgres más una columna de `keywords`, así que entiende sinónimos ("gaseosa" →
-  Coca-Cola) y transcripciones imperfectas ("polo asado" → Pollo Asado).
+- **Cierre de llamada**: cuando la reserva ya quedó guardada y el cliente dice que no
+  necesita nada más, `finalizar_llamada` dice la despedida, espera a que se oiga completa
+  y cierra la sala — la interfaz web vuelve sola al estado inicial.
+- **Fecha actual en el prompt**: el agente sabe qué día es hoy, así que resuelve "mañana"
+  o "el próximo viernes" a una fecha real en vez de inventarla.
 - **Métricas por turno**: cada turno loguea `[latencia]` con el end-to-end real
   (ver la sección de Latencia más abajo).
 
 ## Estructura
 
 ```
-agent.py                 Prompt del agente, sesión, pipeline de voz y métricas
-database/connection.py   Pool de conexiones a Postgres (singleton)
-database/schema.sql      Tablas, índices trigram y productos de ejemplo
-tools/products.py        search_products, build_menu_prompt_block
-tools/orders.py          PedidoEnCurso + add_item_to_order, set_item_quantity,
-                         vaciar_pedido, confirm_order
-tools/call.py            finalizar_llamada (cierra la llamada tras la despedida)
-scripts/bench_llm.py     Compara TTFT entre LLM candidatos con datos reales
-docker-compose.yml       Postgres 17 para desarrollo local
-Dockerfile               Imagen del worker del agente (para Railway u otro host)
-web/                     Interfaz web para hablar con el agente sin teléfono
-                         (main.py: FastAPI + token de LiveKit; static/: la página)
+agent.py                   Prompt del agente, sesión, pipeline de voz y métricas
+database/connection.py     Pool de conexiones a Postgres (singleton)
+database/schema.sql        Tablas (habitaciones, reservas) y tipos de habitación de ejemplo
+tools/habitaciones.py      consultar_disponibilidad, build_catalogo_prompt_block,
+                           build_servicios_prompt_block
+tools/reservas.py          ReservaEnCurso + crear_reserva
+tools/call.py              finalizar_llamada (despedida + cierre de la sala)
+tools/formato.py           Pluralización en español para los textos que arman las tools
+scripts/bench_llm.py       Compara TTFT entre LLM candidatos con datos reales
+docker-compose.yml         Postgres 17 para desarrollo local
+Dockerfile                 Imagen del worker del agente (para Railway)
+web/main.py                Backend mínimo (FastAPI): sirve la página y emite tokens
+web/static/index.html      La interfaz de llamada (una sola página, sin build)
+web/Dockerfile             Imagen del servicio web (para Railway)
 ```
+
+## Interfaz web
+
+`web/` es un servicio aparte y deliberadamente mínimo: FastAPI sirviendo una sola página
+estática (`web/static/index.html`, sin build ni framework) y un endpoint `/api/token`.
+Sirve para llamar al agente desde el navegador sin depender del Agents Playground, y es lo
+que se despliega en Railway para poder mandarle un link a alguien.
+
+```bash
+uv run uvicorn main:app --reload --app-dir web
+```
+
+Abre `http://localhost:8000`, toca el círculo y acepta el permiso de micrófono.
+`web/main.py` firma el access token en el servidor y le agrega el dispatch explícito hacia
+`agent_name="agente-reservas"` (ver `docs/ARQUITECTURA.md` § Telefonía) — sin eso, la sala
+se crea pero el agente nunca entra. El agente tiene que estar corriendo aparte
+(`uv run agent.py dev`).
+
+La interfaz es la misma de la demo de pedidos, en azul y etiquetada "Reservas", para que
+las dos demos se vean como parte de un mismo producto y no se confundan al compartir los
+links.
 
 ## Requisitos
 
@@ -89,14 +120,16 @@ cp .env.example .env
 
 Completa `LIVEKIT_URL`, `LIVEKIT_API_KEY` y `LIVEKIT_API_SECRET` con las credenciales de
 tu proyecto en LiveKit Cloud (Settings → Keys). Las variables de base de datos ya vienen
-con los valores que levanta `docker-compose.yml`. `LLM_MODEL` y `STT_MODEL` son opcionales
-(traen default); la voz (TTS) no es configurable por env a propósito, ver más abajo.
+con los valores que levanta `docker-compose.yml`. `RECEPTIONIST_NAME` y `HOTEL_NAME`
+cambian el nombre que dice el agente en el saludo y en el prompt. `LLM_MODEL` y
+`STT_MODEL` son opcionales (traen default); la voz (TTS) no es configurable por env a
+propósito, ver más abajo.
 
 **3. Levantar Postgres y cargar el esquema**
 
 ```bash
 docker compose up -d
-docker compose exec -T postgres psql -U admin -d chicken_store < database/schema.sql
+docker compose exec -T postgres psql -U admin -d hotel_reservas < database/schema.sql
 ```
 
 **4. Descargar los modelos locales** (VAD y detección de turno, solo la primera vez)
@@ -116,26 +149,9 @@ uv run agent.py dev
 ```
 
 Con `dev`, conéctate desde cualquier cliente de LiveKit — por ejemplo el
-[Agents Playground](https://agents-playground.livekit.io) — usando el mismo proyecto.
-Como el agente usa despacho explícito (`agent_name="agente-pollo"`), indica
-ese nombre como agent name al conectarte desde el Playground, o el agente no
-entrará a la sala (ver `docs/ARQUITECTURA.md` § Telefonía).
-
-## Interfaz web (sin teléfono)
-
-`web/` es una página mínima + un backend FastAPI que emite tokens de LiveKit,
-para hablar con el agente desde el navegador sin necesidad de número de
-teléfono ni del Playground. Para probarla en local, con el agente corriendo
-en modo `dev` en otra terminal:
-
-```bash
-uv run --with fastapi --with "uvicorn[standard]" --with livekit-api --with python-dotenv \
-  uvicorn web.main:app --reload --port 8000
-```
-
-Abre `http://localhost:8000`, toca el botón de llamar y permite el micrófono.
-Para desplegar esto (agente + web) en producción de la forma más barata
-posible, ver [`docs/DEPLOY_RAILWAY.md`](docs/DEPLOY_RAILWAY.md).
+[Agents Playground](https://agents-playground.livekit.io) — usando el mismo proyecto e
+indicando `agente-reservas` como agent name (ver `docs/ARQUITECTURA.md` § Telefonía), o
+usa la interfaz web de arriba, que ya lo hace por ti.
 
 ## Latencia
 
@@ -155,21 +171,21 @@ Para elegir `LLM_MODEL` con datos en vez de teoría:
 uv run python scripts/bench_llm.py
 ```
 
-Mide el time-to-first-token de varios candidatos con un turno representativo de toma de
-pedidos (sin voz, solo el LLM).
+Mide el time-to-first-token de varios candidatos con un turno representativo de reserva
+de hotel (sin voz, solo el LLM).
 
 ## Notas
 
 - `.env` está en `.gitignore` a propósito: nunca subas tus claves al repositorio.
-- El pedido en curso vive en `session.userdata` (`PedidoEnCurso`, en `tools/orders.py`),
+- La reserva en curso vive en `session.userdata` (`ReservaEnCurso`, en `tools/reservas.py`),
   no en un global de módulo: cada llamada tiene su propio estado, así que dos llamadas
   simultáneas en el mismo proceso nunca se mezclan.
 - Las credenciales del `docker-compose.yml` (`admin` / `password`) son solo para
   desarrollo local.
-- Si cambiaste de rama y la base ya tenía datos de antes, recarga el esquema (las tablas
-  `orders`/`order_items` tienen columnas nuevas: `total`, `customer_phone`, `unit_price`):
+- Si tenías la base de datos cargada con el esquema anterior (restaurante), bórrala antes
+  de cargar el nuevo esquema — las tablas cambiaron de nombre y de forma:
   ```bash
-  docker compose exec -T postgres psql -U admin -d chicken_store \
-    -c "DROP TABLE IF EXISTS order_items, orders, products CASCADE;"
-  docker compose exec -T postgres psql -U admin -d chicken_store < database/schema.sql
+  docker compose exec -T postgres psql -U admin -d hotel_reservas \
+    -c "DROP TABLE IF EXISTS order_items, orders, products, reservas, habitaciones CASCADE;"
+  docker compose exec -T postgres psql -U admin -d hotel_reservas < database/schema.sql
   ```

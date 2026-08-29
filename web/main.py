@@ -23,7 +23,7 @@ load_dotenv()
 # agent.py. Como ese decorador usa despacho explicito (no automatico), sin
 # este nombre en el RoomAgentDispatch del token la sala quedaria vacia: el
 # cliente se conectaria pero ningun agente le contestaria.
-AGENT_NAME = "agente-pollo"
+AGENT_NAME = "agente-reservas"
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -42,7 +42,7 @@ def crear_token():
     Cada llamada usa una sala nueva (un cliente = una llamada), igual que una
     llamada telefonica real no comparte linea con otra. El RoomAgentDispatch
     incluido en el propio token es lo que le pide a LiveKit que despache
-    "agente-pollo" a la sala apenas el cliente entre, sin necesidad de una
+    "agente-reservas" a la sala apenas el cliente entre, sin necesidad de una
     llamada aparte a la API de LiveKit para crear el dispatch.
     """
     api_key = os.getenv("LIVEKIT_API_KEY")
@@ -54,7 +54,7 @@ def crear_token():
             detail="Faltan LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET en el entorno.",
         )
 
-    room_name = f"pedido-{_codigo_corto()}"
+    room_name = f"reserva-{_codigo_corto()}"
     identity = f"cliente-{_codigo_corto()}"
 
     token = (

@@ -5,6 +5,13 @@ depender de un número de teléfono. Pensada para seguirse una sola vez desde
 el dashboard de Railway; no requiere su CLI (aunque se menciona como
 alternativa donde ayuda).
 
+> **Esta rama (`reservas`) va en su propio proyecto de Railway**, separado del
+> de la demo de pedidos (rama `pedidos`). Cada demo tiene su propia Postgres y
+> su propio esquema, que no son compatibles entre sí. Lo que **sí** pueden
+> compartir es el proyecto de LiveKit Cloud: los dos workers se registran
+> contra el mismo proyecto y no se estorban, porque el despacho es explícito
+> por nombre (`agente-reservas` vs `agente-pollo`) y cada token pide el suyo.
+
 ## Qué se despliega y dónde
 
 ```
@@ -85,15 +92,20 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
    ```bash
    psql "postgresql://usuario:password@host:puerto/railway" -f database/schema.sql
    ```
-   (Si tu Railway tiene una pestaña **Data**/consulta integrada, también
-   puedes pegar el contenido de `database/schema.sql` ahí directamente.)
+   Si no tienes `psql` instalado (en Windows normalmente no viene), tienes dos
+   alternativas que no requieren instalar nada:
+   - La pestaña **Data** del servicio de Postgres en Railway: abre la consola
+     de consultas y pega ahí el contenido de `database/schema.sql`.
+   - Docker, si ya lo tienes:
+     ```bash
+     docker run --rm -i postgres:17 psql "postgresql://usuario:password@host:puerto/railway" < database/schema.sql
+     ```
 
 ## 2. Desplegar el worker del agente
 
 1. En el mismo proyecto: **New** → **GitHub Repo** → selecciona
-   `demo-voice-agent` → rama **`pedidos`** (ahí está la demo de toma de
-   pedidos, ya con todo fusionado; `main` es el código original y `reservas`
-   es la otra demo, que va en su propio proyecto de Railway).
+   `demo-voice-agent` → rama **`reservas`** (`main` es el código original y
+   `pedidos` es la otra demo, que va en su propio proyecto de Railway).
 2. Railway detecta el `Dockerfile` de la raíz automáticamente (Root
    Directory = `/`, el default). No hace falta tocar el build.
 3. Ve a **Variables** de este servicio y agrega:
@@ -108,8 +120,13 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
    DB_NAME=${{Postgres.PGDATABASE}}
    LLM_MODEL=openai/gpt-4.1-mini
    STT_MODEL=deepgram/flux-general-multi
+   RECEPTIONIST_NAME=Valentina
+   HOTEL_NAME=Hotel Colonial
+   ZONA_HORARIA=America/Bogota
    AVISO_LEGAL=false
    ```
+   `ZONA_HORARIA` no es cosmética: el contenedor de Railway corre en UTC, y sin
+   ella el agente resolvería "mañana" con el día equivocado durante la noche.
    `${{Postgres.PGHOST}}` es la sintaxis de Railway para referenciar la
    variable de **otro** servicio del mismo proyecto — usa el nombre que le
    puso Railway a tu servicio de Postgres (por defecto suele llamarse
@@ -123,7 +140,7 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 ## 3. Desplegar la interfaz web
 
 1. En el mismo proyecto: **New** → **GitHub Repo** → mismo repo, misma rama
-   `pedidos`, pero esta vez en **Settings** de ese servicio pon
+   `reservas`, pero esta vez en **Settings** de ese servicio pon
    **Root Directory = `web`**. Railway usará `web/Dockerfile`.
 2. Variables de este servicio (son las únicas tres que necesita):
    ```
@@ -140,9 +157,10 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 
 1. Abre la URL pública del servicio `web`.
 2. Toca el botón de llamar, acepta el permiso de micrófono.
-3. Corre el guion de prueba de `docs/SPEC.md` § Criterios de aceptación
-   (escenario 11): pedir productos, corregir algo, confirmar con nombre y
-   dirección, despedirte — la llamada debe cerrarse sola.
+3. Corre el guion de prueba de `docs/SPEC.md` § Criterios de aceptación:
+   preguntar por una habitación, pedir disponibilidad para unas fechas,
+   elegir una opción, dar nombre y teléfono, confirmar y despedirte — la
+   llamada debe cerrarse sola y la página volver a su estado inicial.
 4. Si no conecta: revisa los logs de `agent-worker` (¿arrancó? ¿se conectó a
    Postgres?) y de `web` (¿el `/api/token` devuelve 200?), en ese orden.
 
@@ -180,7 +198,7 @@ descarta una causa distinta:
    - Si la sala **sí se crea** pero el agente nunca entra, entra al detalle
      de esa sala/sesión y mira los participantes: solo debería estar el
      participante del navegador. Esto confirma que el despacho explícito
-     (`RoomAgentDispatch` con `agent_name="agente-pollo"`) no está
+     (`RoomAgentDispatch` con `agent_name="agente-reservas"`) no está
      alcanzando a ningún worker — revisa el punto 4.
    - Si el dashboard tiene alguna vista de **Agents/Workers** conectados,
      confirma ahí que `agent-worker` aparece como conectado/en línea. Si no

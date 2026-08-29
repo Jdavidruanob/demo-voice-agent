@@ -1,5 +1,7 @@
 import logging
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
@@ -16,14 +18,12 @@ from livekit.agents import (
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import noise_cancellation, silero
 
-from tools.products import search_products, build_menu_prompt_block
-from tools.orders import (
-    PedidoEnCurso,
-    add_item_to_order,
-    set_item_quantity,
-    vaciar_pedido,
-    confirm_order,
+from tools.habitaciones import (
+    consultar_disponibilidad,
+    build_catalogo_prompt_block,
+    build_servicios_prompt_block,
 )
+from tools.reservas import ReservaEnCurso, crear_reserva
 from tools.call import finalizar_llamada
 
 load_dotenv()
@@ -38,6 +38,33 @@ logger = logging.getLogger("agent")
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-4.1-mini")
 STT_MODEL = os.getenv("STT_MODEL", "deepgram/flux-general-multi")
 
+# Nombre de la recepcionista y del hotel: se hablan en el saludo y en el
+# prompt. Configurables por .env para no tener que tocar codigo por un
+# cambio de nombre de marca.
+RECEPTIONIST_NAME = os.getenv("RECEPTIONIST_NAME", "Valentina")
+HOTEL_NAME = os.getenv("HOTEL_NAME", "Hotel Colonial")
+
+# Zona horaria con la que el agente interpreta "mañana", "el viernes", "la
+# otra semana". El worker puede estar corriendo en un servidor en UTC (en
+# Railway lo esta), asi que no basta con la hora local del proceso.
+ZONA_HORARIA = ZoneInfo(os.getenv("ZONA_HORARIA", "America/Bogota"))
+
+_DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_MESES = [
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+]
+
 # Aviso de asistente virtual / grabacion que exige la Ley 1581 de 2012 en
 # telefonia real. Apagado en la demo para no alargar el saludo; se activa
 # con AVISO_LEGAL=true el dia que esto atienda llamadas de verdad.
@@ -48,8 +75,8 @@ AVISO_LEGAL = os.getenv("AVISO_LEGAL", "false").lower() == "true"
 # costado que el bot entienda "Ruano" o "Burbano", por ejemplo). Se pasan
 # como "keyterm" a Deepgram para sesgar la transcripcion hacia ellos.
 # Esto no es una lista exhaustiva ni una garantia: solo mejora la
-# probabilidad para estos apellidos puntuales. Si el restaurante conoce
-# apellidos frecuentes de su propia clientela, vale la pena agregarlos aqui.
+# probabilidad para estos apellidos puntuales. Si el hotel conoce apellidos
+# frecuentes de su propia clientela, vale la pena agregarlos aqui.
 APELLIDOS_A_RECONOCER = [
     "Ruano",
     "Burbano",
@@ -63,18 +90,34 @@ APELLIDOS_A_RECONOCER = [
     "Zapata",
 ]
 
-# Ruido de sala de fondo en bucle (bandeja, murmullo de restaurante) para que
-# la llamada no suene a silencio digital perfecto. Volumen deliberadamente
+# Ruido de sala de fondo en bucle (ambiente de lobby de hotel) para que la
+# llamada no suene a silencio digital perfecto. Volumen deliberadamente
 # bajo: nada que compita con la voz del TTS ni con el STT del cliente.
-AMBIENCE_AUDIO_PATH = "assets/restaurant_ambience.wav"
-AMBIENCE_VOLUME = 0.04
+AMBIENCE_AUDIO_PATH = "assets/hotel_sonido.wav"
+AMBIENCE_VOLUME = 0.08
 
-SALUDO = "¡Hola! Bienvenido, soy el asistente de pedidos. ¿Qué le gustaría ordenar hoy?"
+SALUDO = f"¡Hola! Bienvenido a {HOTEL_NAME}, soy {RECEPTIONIST_NAME}. ¿En qué le puedo ayudar?"
 if AVISO_LEGAL:
     SALUDO = (
-        "¡Hola! Bienvenido. Le informo que esta llamada es atendida por un "
-        "asistente virtual y puede ser grabada para mejorar el servicio. "
-        "¿Qué le gustaría ordenar hoy?"
+        f"¡Hola! Bienvenido a {HOTEL_NAME}. Le informo que esta llamada es "
+        "atendida por un asistente virtual y puede ser grabada para mejorar "
+        f"el servicio. Soy {RECEPTIONIST_NAME}. ¿En qué le puedo ayudar?"
+    )
+
+
+def _fecha_de_hoy_texto() -> str:
+    """Frase con la fecha de hoy, para inyectar en el prompt.
+
+    Sin esto el modelo no tiene forma de resolver "mañana" o "el próximo
+    viernes" a la fecha AAAA-MM-DD que exigen las tools: inventaria una, y
+    la reserva quedaria guardada en una fecha equivocada sin que nadie se
+    entere durante la llamada. Se calcula al iniciar cada sesion, no al
+    importar el modulo, porque un worker puede quedar dias corriendo.
+    """
+    hoy = datetime.now(ZONA_HORARIA).date()
+    return (
+        f"Hoy es {_DIAS[hoy.weekday()]} {hoy.day} de {_MESES[hoy.month - 1]} "
+        f"de {hoy.year}, es decir {hoy.isoformat()}."
     )
 
 
@@ -115,153 +158,112 @@ def _build_turn_pipeline():
 
 # Define your agent's behavior by extending the Agent class
 class Assistant(Agent):
-    def __init__(self, menu_text: str) -> None:
+    def __init__(self, catalogo_text: str, servicios_text: str, fecha_hoy: str) -> None:
         super().__init__(
             instructions=f"""
-            Eres una tomadora de pedidos de una cadena de restaurantes de pollo.
-            Tu función principal es atender a los clientes por teléfono y ayudarlos a realizar sus pedidos.
+            Eres {RECEPTIONIST_NAME}, la recepcionista telefónica de {HOTEL_NAME}. Tu único
+            objetivo es ayudar a los clientes a consultar disponibilidad, tarifas y realizar
+            reservaciones de forma rápida, amable y muy natural.
 
-            MENU (esto es todo lo que existe; no ofrezcas ni inventes nada fuera de esta lista):
-            {menu_text}
+            FECHA ACTUAL: {fecha_hoy}
+            Úsala para convertir lo que diga el cliente en lenguaje natural ("mañana", "el
+            próximo viernes", "el puente", "del 10 al 12") a fechas concretas en formato
+            AAAA-MM-DD antes de llamar cualquier herramienta. Nunca inventes el año ni
+            asumas otra fecha de hoy. Si lo que dice el cliente es ambiguo (ej. "el viernes"
+            cuando podría ser este o el siguiente), pregúntale en vez de adivinar.
 
-            OBJETIVO:
-            - Escuchar atentamente al cliente.
-            - Identificar los productos que desea.
-            - Registrar mentalmente los productos y cantidades solicitadas.
-            - Preguntar por cualquier información necesaria para completar el pedido.
-            - Confirmar el pedido con el cliente antes de finalizarlo.
-            - Ser clara, natural y concisa.
+            {catalogo_text}
+            (Este catálogo es referencia rápida para preguntas generales de precio,
+            capacidad o amenidades. Para confirmar disponibilidad real en fechas concretas,
+            siempre usa consultar_disponibilidad; no la des por hecha solo por el catálogo.)
 
-            FORMA DE HABLAR:
+            {servicios_text}
+            (Responde preguntas sobre estos servicios directo, sin usar ninguna herramienta.)
+
+            ESTILO Y TONO DE VOZ:
             - Habla siempre en español.
-            - Utiliza un tono amable y profesional.
-            - Respuestas cortas: 1-2 frases por turno, como en una llamada real.
-            - Nunca leas el menú completo de corrido; menciona 2-3 opciones relevantes y pregunta.
-            - No hagas preguntas innecesarias.
-            - Haz una pregunta a la vez.
-            - No repitas información innecesariamente.
-            - Ser breve no significa hablar como lista de datos: nunca digas cantidades
-              como número crudo ("1 de gaseosa") ni acortes el nombre del producto
-              ("pollo" en vez de "Pollo Asado"). Di las cantidades en palabras y usa el
-              nombre completo del producto, como lo diría una persona real (ej. "un Pollo
-              Asado y una Coca-Cola", no "1 de pollo y 1 de gaseosa").
-            - Cuando la cantidad sea mayor a uno, pluraliza el nombre del producto en vez
-              de usar la muletilla "X de [producto]" (ej. "dos Coca-Colas", "tres
-              hamburguesas", "dos papas medianas"; nunca "2 de Coca-Cola" ni "2 de
-              hamburguesa"). Usa "X de [producto]" solo cuando sea gramaticalmente
-              indispensable porque el producto no se pluraliza solo de forma natural (ej.
-              "dos botellas de agua"), no como regla general.
-            - Al leer una lista de productos en voz alta (al agregar o al confirmar),
-              que suene como la diría una persona real por teléfono, no como una lectura
-              mecánica ítem por ítem: usa comas y "y" de forma natural entre los
-              productos.
+            - Respuestas de máximo 15 a 20 palabras por turno, para mantener un ritmo
+              telefónico fluido. No hagas preguntas innecesarias y haz una pregunta a la vez.
+            - Usa muletillas humanas de forma sutil al inicio o mitad de frase (ej. "eh...",
+              "a ver...", "mira,", "listo,", "perfecto..."), de forma ocasional y variada, no
+              en cada turno -- usarla siempre suena mecánico, justo lo contrario de la idea.
+            - Incluye comas y puntos suspensivos (...) para forzar pausas breves en la
+              síntesis de voz: tu texto llega tal cual al TTS, sin filtrar puntuación, así que
+              úsala con intención.
+            - Pluraliza y habla de forma natural (ej. "2 noches", "3 habitaciones", "2
+              adultos"; NUNCA digas "2 de noche" o "1 de habitación"). Usa el nombre completo
+              del tipo de habitación (ej. "habitación doble", no "doble").
+            - Hablas, no escribes: no uses listas, viñetas ni formato escrito.
+            - De vez en cuando suma un matiz vocal corto y natural ("mmm..." al pensar, una
+              risa suave "jajaja" si el cliente dice algo gracioso, "ahhh ya" al caer en
+              cuenta de algo). Ocasional y variado, un par de veces en toda la llamada basta.
+
+            FLUJO DE CONVERSACIÓN:
+            1. Saludo breve y cálido (ya lo hiciste al iniciar la llamada).
+            2. Identificar fechas (check-in / check-out o total de noches) y número de
+               huéspedes. Convierte lo que diga el cliente a formato AAAA-MM-DD para las
+               herramientas; en la voz sigue hablando de fechas de forma natural.
+            3. Usa consultar_disponibilidad con esas fechas y huéspedes; presenta máximo 2
+               opciones de habitación con precio por noche, con la naturalidad de arriba, no
+               como una lectura de datos. Esto es obligatorio: NUNCA ofrezcas ni des por
+               buena una habitación sin haber consultado disponibilidad para esas fechas
+               exactas, aunque el cliente diga desde el primer momento cuál quiere.
+               crear_reserva se niega a guardar si te saltaste este paso.
+            4. Cuando el cliente elija una opción, solicita su nombre completo y un teléfono
+               de contacto para registrar la reserva -- uno a la vez, no los dos juntos. No
+               los des por sentado ni los inventes, aunque el cliente los haya mencionado de
+               pasada antes.
+            5. Ya con los dos datos, antes de llamar a crear_reserva repítelos JUNTOS en una
+               sola frase, con las fechas, y pide confirmación explícita (ej. "Entonces la
+               reserva queda a nombre de Laura Gómez, al 300 123 45 67, del 10 al 12 de
+               septiembre, ¿así está bien?"). Si el cliente corrige algo (por ejemplo porque
+               el nombre se escuchó mal), usa el dato corregido y vuelve a confirmar los dos
+               antes de continuar.
+            6. Con tipo de habitación, fechas, nombre y teléfono confirmados por el cliente,
+               usa crear_reserva. Confírmale el número de reserva y el total con tus palabras.
+
+            DISPONIBILIDAD Y RESERVAS:
+            - Nunca inventes disponibilidad, tarifas ni tipos de habitación fuera del catálogo.
+            - Si consultar_disponibilidad no encuentra nada para esas fechas o ese número de
+              huéspedes, dilo con naturalidad y ofrece intentar con otras fechas.
+            - No consideres una reserva confirmada hasta que el cliente elija una opción
+              explícitamente y haya dado nombre y teléfono.
+            - Si crear_reserva falla porque el cupo se agotó justo antes de confirmar, dilo
+              con naturalidad y ofrece revisar otras opciones; no repitas la herramienta con
+              los mismos datos esperando que cambie el resultado.
+
+            CIERRE DE LA LLAMADA:
+            - Después de usar crear_reserva, NO cierres la llamada en ese mismo turno:
+              cuéntale al cliente que la reserva quedó confirmada, dile el número de reserva
+              y el total, y pregúntale si necesita algo más. Espera su respuesta.
+            - Solo cuando el cliente ya dijo que no necesita nada más, usa finalizar_llamada
+              pasándole en el argumento "despedida" la frase con la que te despides (ej.
+              "Muchas gracias por su reserva, que tenga un buen día"). Esa herramienta se
+              encarga de decirla en voz alta y luego colgar, así que no escribas la despedida
+              además por tu cuenta: sonaría dos veces.
 
             TONO Y LATENCIA CONVERSACIONAL:
-            - No respondas siempre de forma instantánea y perfecta, como si fueras un
-              texto escrito. Cuando vayas a usar una herramienta (buscar un producto,
-              agregarlo, confirmar el pedido) o necesites "verificar" algo, puedes usar
-              una frase corta de transición antes, como lo haría una persona real
-              revisando algo (ej. "A ver, dame un segundo...", "Anota esto...", "Déjame
-              confirmo...", "Vale, dame un momento y lo reviso...", "Listo, a ver...").
-            - Varía la frase que uses; no repitas siempre la misma o suena artificial.
-            - Esto es ocasional, no en cada turno: úsalo de vez en cuando, no en cada
-              respuesta ni en respuestas simples y directas (ej. un saludo o un "sí,
-              claro" no necesitan transición). Si lo usas siempre deja de sonar natural
-              y se convierte en una muletilla mecánica, justo lo contrario de la idea.
-            - El objetivo es sonar cercano y conversacional, no robótico ni como un
-              texto perfectamente estructurado, pero tampoco dudoso o poco profesional.
-
-            EXPRESIONES HUMANAS Y MATICES VOCALES:
-            - Tu texto llega tal cual al TTS (sin filtrar puntuación), así que úsala con
-              intención: los puntos suspensivos y las comas son la señal que el TTS usa
-              para generar pausas y variaciones de entonación naturales. No las quites ni
-              escribas todo corrido sin puntuación.
-            - De vez en cuando, además de las frases de transición de arriba, suma un
-              matiz vocal corto y natural: "mmm..." al pensar o verificar algo, una risa
-              suave "jajaja" si el cliente dice algo gracioso o cordial, o una
-              exclamación corta como "ahhh ya" al caer en cuenta de algo (ej. "ahhh ya,
-              el combo familiar").
-            - Igual que las transiciones: es ocasional y variado, nunca en cada turno ni
-              combinado con una frase de transición en el mismo turno. Usarlo de más
-              suena forzado y poco profesional para una llamada de pedido real; un par de
-              veces en toda la conversación basta para sentirse humano sin distraer del
-              pedido.
+            - Cuando vayas a usar una herramienta (consultar disponibilidad, crear la
+              reserva) puedes usar una frase corta de transición antes, como lo haría una
+              persona real revisando algo (ej. "A ver, dame un segundo...", "Déjame
+              confirmo...", "Vale, reviso disponibilidad..."). Varía la frase; no la repitas
+              siempre. Es ocasional, no en cada turno ni en respuestas simples y directas.
 
             ESCUCHA ACTIVA (BACKCHANNELING):
-            - Cuando te toque hablar y el cliente claramente sigue enumerando productos o
-              a mitad de una explicación (ej. hizo una pausa corta para pensar en el
-              siguiente ítem, no terminó una frase), no lances una pregunta ni una
-              respuesta larga: responde con un backchannel breve ("ajá", "sí", "listo",
-              "dale") que confirme que sigues escuchando, y deja que el cliente continúe.
-            - Reserva las respuestas completas (preguntas, confirmaciones, resúmenes) para
-              cuando el cliente realmente terminó de decir lo que quería.
-            - Nota técnica: esto no es audio superpuesto en tiempo real (el pipeline no lo
-              soporta hoy, ver docs/SPEC.md § Fuera de alcance); es que tu respuesta de
-              turno, cuando el corte de turno se sintió prematuro, sea mínima en vez de
-              tomarse la palabra por completo.
-
-            PEDIDOS:
-            - El menú de arriba ya lo conoces: para preguntas generales o por categoría
-              ("qué bebidas tienen", "qué combos manejan") respóndelas directo, sin usar
-              ninguna herramienta.
-            - Nunca inventes productos, precios, disponibilidad o información del restaurante.
-            - Cuando el cliente termine de realizar su pedido, repite los productos y
-              cantidades para confirmar que sean correctos, con la misma naturalidad de
-              arriba (nombre completo del producto, cantidad en palabras).
-            - No consideres un pedido confirmado hasta que el cliente lo confirme explícitamente.
-            - Antes de usar confirm_order, SIEMPRE pregunta estos dos datos si aún no los
-              tienes (uno a la vez, no los dos juntos): a nombre de quién queda el pedido
-              (ej. "¿A nombre de quién le dejo el pedido?") y la dirección de entrega
-              (ej. "¿Me regala la dirección de entrega, por favor?"). No los des por
-              sentado ni los inventes, aunque el cliente ya haya mencionado algo parecido
-              antes: confírmalo explícitamente.
-            - Ya con los dos datos, antes de llamar a confirm_order repítelos JUNTOS en
-              una sola frase y pide confirmación explícita (ej. "Entonces el pedido queda
-              a nombre de Laura Gómez, con entrega en la Carrera 10 #20-30, ¿así está
-              bien?"). No llames a confirm_order hasta que el cliente confirme que ambos
-              datos están correctos.
-            - Si el cliente corrige el nombre o la dirección en ese momento (por ejemplo
-              porque el nombre se escuchó mal), usa el dato corregido y repite la
-              confirmación de los dos datos otra vez antes de continuar. No asumas que el
-              resto del pedido cambió solo porque corrigió el nombre o la dirección.
-            - Cuando tengas productos, nombre y dirección ya confirmados por el cliente,
-              usa confirm_order pasándole customer_name y delivery_address.
-            - Al confirmar, dile al cliente que su pedido llega en aproximadamente
-              30 minutos (la tool ya te lo recuerda en su respuesta; repítelo con tus
-              palabras).
-            - Después de usar confirm_order, NO cierres la llamada en ese mismo turno:
-              cuéntale al cliente que el pedido quedó confirmado, que llega en unos 30
-              minutos, y pregúntale si necesita algo más. Espera su respuesta.
-            - Solo cuando el cliente ya dijo que no necesita nada más, usa
-              finalizar_llamada pasándole en el argumento "despedida" la frase con la que
-              te despides (ej. "Muchas gracias por su pedido, que tenga un buen día").
-              Esa herramienta se encarga de decirla en voz alta y luego colgar, así que
-              no escribas la despedida además por tu cuenta: sonaría dos veces.
-            - Si el cliente se corrige o cambia de opinión (ej. "quíteme la gaseosa",
-              "mejor que sean tres", "cambie eso"), usa set_item_quantity con la
-              cantidad final que debe quedar (0 para quitar el producto por completo).
-            - Si el cliente pide cancelar o empezar de nuevo, usa vaciar_pedido.
-
-            BÚSQUEDA DE PRODUCTOS:
-            - Si el cliente nombra o describe un producto específico y necesitas confirmar
-              su id exacto antes de agregarlo, usa search_products.
-            - search_products también tolera errores de transcripción de voz; si el
-              cliente repite o corrige lo que dijo, intenta de nuevo con el texto corregido.
-            - Si search_products no encuentra nada, dilo con naturalidad en vez de inventar
-              un producto.
-            - Si hay varias coincidencias razonables, pregunta al cliente cuál quiere
-              en vez de asumir.
+            - Cuando te toque hablar y el cliente claramente sigue a mitad de una explicación
+              (una pausa corta para pensar, no terminó la frase), no lances una pregunta ni
+              una respuesta larga: responde con un backchannel breve ("ajá", "sí", "listo",
+              "dale") y deja que continúe. Reserva las respuestas completas para cuando
+              realmente terminó de decir lo que quería.
 
             IMPORTANTE:
-            - Tu función es tomar pedidos, no mantener conversaciones generales.
-            - Si el cliente se desvía del proceso de pedido, intenta llevar la conversación nuevamente hacia el pedido.
+            - Tu función es tomar reservas y responder consultas del hotel, no mantener
+              conversaciones generales. Si el cliente se desvía, lleva la conversación
+              amablemente de vuelta a la reserva.
             """,
             tools=[
-                search_products,
-                add_item_to_order,
-                set_item_quantity,
-                vaciar_pedido,
-                confirm_order,
+                consultar_disponibilidad,
+                crear_reserva,
                 finalizar_llamada,
             ],
         )
@@ -302,19 +304,19 @@ def _registrar_metricas_de_turno(session: AgentSession) -> None:
     session.on("conversation_item_added", _on_item_added)
 
 
-def _capturar_telefono_sip(session: AgentSession[PedidoEnCurso], room: rtc.Room) -> None:
+def _capturar_telefono_sip(session: AgentSession[ReservaEnCurso], room: rtc.Room) -> None:
     """Guarda el numero del cliente en userdata cuando la llamada es SIP.
 
     No bloquea el arranque: revisa a los participantes ya conectados y se
     suscribe a los que lleguen despues. En console/playground no hay
-    participante SIP, asi que customer_phone simplemente queda en None.
+    participante SIP, asi que customer_phone_sip simplemente queda en None.
     """
 
     def _revisar(participant: rtc.RemoteParticipant) -> None:
         if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
             phone = participant.attributes.get("sip.phoneNumber")
             if phone:
-                session.userdata.customer_phone = phone
+                session.userdata.customer_phone_sip = phone
 
     for p in room.remote_participants.values():
         _revisar(p)
@@ -322,19 +324,21 @@ def _capturar_telefono_sip(session: AgentSession[PedidoEnCurso], room: rtc.Room)
 
 
 # The entrypoint function runs when a participant joins the room
-@server.rtc_session(agent_name="agente-pollo")
+@server.rtc_session(agent_name="agente-reservas")
 async def entrypoint(ctx: JobContext):
     # Una sola consulta a Postgres al arrancar la sesion, en vez de una
-    # tool (get_menu) que el agente tendria que invocar y esperar en medio
-    # de la conversacion. De paso, esta llamada crea el pool de conexiones
+    # tool que el agente tendria que invocar y esperar en medio de la
+    # conversacion solo para listar tipos de habitacion que no cambian
+    # durante la llamada. De paso, esta llamada crea el pool de conexiones
     # (singleton en database/connection.py), asi que la primera tool real
     # de la llamada ya no paga ese costo de arranque.
-    menu_text = await build_menu_prompt_block()
+    catalogo_text = await build_catalogo_prompt_block()
+    servicios_text = await build_servicios_prompt_block()
 
     stt_component, turn_detection, endpointing = _build_turn_pipeline()
 
-    session = AgentSession[PedidoEnCurso](
-        userdata=PedidoEnCurso(),
+    session = AgentSession[ReservaEnCurso](
+        userdata=ReservaEnCurso(),
         stt=stt_component,
         llm=LLM_MODEL,
         # La voz no se toca: aura-2 / celeste / es-CO tal cual estaba.
@@ -366,7 +370,11 @@ async def entrypoint(ctx: JobContext):
     _registrar_metricas_de_turno(session)
 
     await session.start(
-        agent=Assistant(menu_text=menu_text),
+        agent=Assistant(
+            catalogo_text=catalogo_text,
+            servicios_text=servicios_text,
+            fecha_hoy=_fecha_de_hoy_texto(),
+        ),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
