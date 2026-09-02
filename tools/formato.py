@@ -1,9 +1,10 @@
-"""Pluralizacion en espanol para textos generados en Python (bloques de
-disponibilidad, confirmaciones de reserva) que despues lee el LLM o el TTS.
+"""Pluralizacion en espanol para textos generados en Python (resumenes de
+pedido, confirmaciones) que despues lee el LLM o el TTS.
 
 No reemplaza el trabajo que ya hace el prompt para la voz del LLM (ver
-agent.py): esto es para el texto que arman las tools directamente, donde no
-hay LLM de por medio para decidir "2 noches" en vez de "2 de noche".
+agent.py): esto es para el texto que arma tools/orders.py directamente,
+donde no hay LLM de por medio para decidir "2 lasagnas" en vez de "2 de
+lasagna".
 """
 
 
@@ -28,58 +29,27 @@ def formatear_cantidad(cantidad: int, singular: str, plural: str | None = None) 
     return f"{cantidad} {plural or pluralizar_sustantivo(singular)}"
 
 
-# Plurales de los adjetivos de tipo de habitacion que maneja el hotel. Se usa
-# una tabla en vez del pluralizador generico porque "habitacion" pierde la
-# tilde en plural (habitacion -> habitaciones) y el adjetivo debe concordar
-# en genero y numero (doble -> dobles), algo que una regla generica no
-# resuelve bien para un catalogo tan chico.
-_PLURALES_ADJETIVO = {
-    "sencilla": "sencillas",
-    "doble": "dobles",
-    "triple": "triples",
-    "familiar": "familiares",
-    "presidencial": "presidenciales",
-}
+def formatear_platos(cantidad: int, nombre_plato: str) -> str:
+    """Pluraliza el nombre de un plato del menu (ej. 2 -> '2 Lasagnas Bolognesa').
 
-# Palabras extranjeras que no se pluralizan en español (ej. "Suite Junior"
-# -> "suites junior", nunca "juniors" ni "juniores").
-_ADJETIVOS_INVARIABLES = {"junior"}
-
-
-def _pluralizar_adjetivo(palabra: str) -> str:
-    minuscula = palabra.lower()
-    if minuscula in _ADJETIVOS_INVARIABLES:
-        return palabra
-    if minuscula in _PLURALES_ADJETIVO:
-        return _PLURALES_ADJETIVO[minuscula]
-    return pluralizar_sustantivo(palabra)
-
-
-def formatear_habitaciones(cantidad: int, tipo_habitacion: str) -> str:
-    """Pluraliza 'habitacion <tipo>' completo (ej. 3 -> 'habitaciones dobles').
-
-    Para "suite" (y compuestos como "Suite Junior") no antepone "habitacion"
-    (se dice "una suite", "dos suites junior", no "una habitación suite").
+    Solo pluraliza la primera palabra (el tipo de plato: Lasagna, Spaguetti,
+    Arroz, Filete, Chuleta...); el resto del nombre (el sabor/proteina:
+    "Bolognesa", "Carbonara", "de Cerdo") queda invariable, tal como suena
+    natural en espanol para un nombre de plato ("2 Spaguettis Carbonara", no
+    "2 Spaguettis Carbonaras"; "3 Chuletas de Cerdo", no "3 Chuletas de
+    Cerdos"). Nunca usa la forma "X de <plato>".
     """
-    palabras = tipo_habitacion.strip().split()
+    palabras = nombre_plato.strip().split()
     if not palabras:
-        return formatear_cantidad(cantidad, tipo_habitacion)
+        return formatear_cantidad(cantidad, nombre_plato)
 
     primera, *resto = palabras
+    primera_plural = pluralizar_sustantivo(primera)
 
-    if primera.lower() == "suite":
-        base_singular, base_plural = "suite", "suites"
-    else:
-        base_singular = f"habitación {primera}"
-        base_plural = f"habitaciones {_pluralizar_adjetivo(primera)}"
+    singular = " ".join([primera, *resto])
+    plural = " ".join([primera_plural, *resto])
 
-    if resto:
-        cola_singular = " " + " ".join(resto)
-        cola_plural = " " + " ".join(_pluralizar_adjetivo(palabra) for palabra in resto)
-    else:
-        cola_singular = cola_plural = ""
-
-    return formatear_cantidad(cantidad, base_singular + cola_singular, base_plural + cola_plural)
+    return formatear_cantidad(cantidad, singular, plural)
 
 
 def formatear_precio(price: int) -> str:

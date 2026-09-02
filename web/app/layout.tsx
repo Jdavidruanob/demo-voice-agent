@@ -21,8 +21,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "agente-hotel-reservas",
-  description: "Consola de prueba para llamar por voz al agente de reservas.",
+  title: "agente-macadamia",
+  description: "Consola de prueba para llamar por voz al agente de pedidos.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -29,6 +29,9 @@ htmlcov/
 # Modelos descargados por los plugins de LiveKit
 .cache/
 
+# Grafo de conocimiento generado por graphify (local, incluye rutas de esta maquina)
+graphify-out/
+
 # Editores
 .vscode/
 .idea/

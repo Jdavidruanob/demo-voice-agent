@@ -8,36 +8,40 @@ de seguir construyendo encima. Ver `docs/ARQUITECTURA.md` para el cómo.
 
 ## 1. Objetivo
 
-Un agente de voz en español que le muestre a un comprador potencial (dueño de
-hotel) que un bot puede atender la recepción telefónica **de forma fluida y
-natural**, sin sonar robótico ni tener pausas incómodas. La fluidez es la
-métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
+Un agente de voz en español que le muestre a un comprador potencial (dueño
+de Restaurante Macadamia) que un bot puede tomar pedidos telefónicos **de
+forma fluida y natural**, sin sonar robótico ni tener pausas incómodas. La
+fluidez es la métrica de éxito de esta fase, por encima de cobertura de
+funcionalidades.
 
 ## 2. Alcance de esta fase (demo comercial)
 
 **Dentro de alcance:**
-- Consultar disponibilidad de un catálogo fijo y pequeño de tipos de
-  habitación (6, con descripción/amenidades) para un rango de fechas y
-  número de huéspedes.
-- Informar tarifa por noche y total de la estadía.
-- Responder preguntas generales sobre el hotel (check-in/checkout,
-  desayuno, wifi, parqueadero, piscina, mascotas) desde un catálogo fijo.
-- Confirmar y persistir una reserva.
+- Menú fijo de 19 platos en 5 categorías: LASAGNA (3), SPAGUETTI (4),
+  ARROCES (3), ESPECIALES (2, uno por día específico) y ALMUERZO EJECUTIVO
+  (7).
+- Responder preguntas generales sobre cualquier plato (precio, composición)
+  desde el menú fijo, sin necesidad de una tool.
+- Buscar un plato puntual quando el cliente lo nombra de forma ambigua o con
+  errores de transcripción de voz.
+- Tomar pedido: agregar platos con cantidad, corregir cantidades, vaciar el
+  pedido.
+- Para ALMUERZO EJECUTIVO: exigir que el cliente elija principio (frijoles,
+  lentejas o pasta) antes de agregarlo al pedido.
+- Para ESPECIALES: verificar que el día pedido coincida con el día en que
+  ese especial existe (Ajiaco solo miércoles, Bandeja Paisa solo viernes).
+- Confirmar y persistir el pedido con nombre y dirección de entrega.
 - Sonar fluido: sin silencios muertos, sin cortes de turno torpes, primera
   respuesta instantánea.
 
 **Fuera de alcance (explícito, no es un olvido):**
-- Múltiples sedes/hoteles.
-- Cancelar o modificar una reserva ya confirmada (la columna `estado` en
-  `reservas` deja el campo listo, pero no hay tool para usarlo).
-- Check-in / check-out real, asignación de número de habitación física, o
-  seguimiento posterior a la reserva (facturación, servicios adicionales).
-- Pagos.
-- Portal/dashboard para el hotel (se discutió arquitectura — Postgres
-  compartida entre agente y portal — pero no se construyó).
+- Múltiples sedes de Macadamia.
+- Cancelar o modificar un pedido ya confirmado.
+- Pagos (el pedido se confirma contra-entrega, sin cobro en la llamada).
+- Portal/dashboard para el restaurante.
 - Conexión a un número de teléfono real (troncal SIP, portabilidad).
-  Discutido a fondo en la demo anterior (mismo hallazgo aplica, ver hilo de
-  decisiones más abajo) pero no iniciado.
+  Discutido a fondo en fases anteriores del proyecto (mismo hallazgo aplica,
+  ver hilo de decisiones más abajo) pero no iniciado.
 - Multi-idioma. Solo español.
 - Backchanneling con audio real superpuesto (que el agente diga "ajá" con su
   propia voz *mientras* el cliente sigue hablando, sin cerrar su turno). El
@@ -56,59 +60,63 @@ métrica de éxito de esta fase, por encima de cobertura de funcionalidades.
 
 Expresados como comportamiento observable, no como implementación.
 
-**RF-1 — Saludo inmediato.** Al iniciar la sesión, el agente saluda sin que
-el cliente tenga que hablar primero, y sin una pausa perceptible de roundtrip
-de LLM.
+**RF-1 — Saludo inmediato.** Al iniciar la sesión, el agente saluda
+mencionando "Restaurante Macadamia" sin que el cliente tenga que hablar
+primero, y sin una pausa perceptible de roundtrip de LLM.
 
-**RF-2 — Consulta de catálogo sin fricción.** Preguntas generales de tarifa,
-capacidad o amenidades ("¿cuánto cuesta la suite?", "¿la doble para cuántas
-personas es?", "¿la familiar tiene nevera?") y preguntas sobre servicios del
-hotel ("¿a qué hora es el check-in?", "¿tienen piscina?", "¿aceptan
-mascotas?") se responden en el mismo turno, sin necesidad de que el sistema
-"vaya a buscar" nada — el catálogo de habitaciones y la info del hotel ya
-están en el prompt.
+**RF-2 — Consulta de menú sin fricción.** Preguntas generales de precio o
+composición de un plato ("¿cuánto cuesta la lasagna mixta?", "¿qué trae el
+almuerzo ejecutivo?", "¿qué arroces tienen?") se responden en el mismo
+turno, sin necesidad de que el sistema "vaya a buscar" nada — el menú
+completo ya está en el prompt.
 
-**RF-3 — Identificación de fechas y huéspedes.** El sistema identifica fecha
-de entrada, fecha de salida (o total de noches) y número de huéspedes antes
-de consultar disponibilidad; si el cliente da la información de forma
-ambigua o incompleta, pregunta en vez de asumir.
+**RF-3 — Búsqueda de plato puntual.** Si el cliente nombra o describe un
+plato específico y el sistema necesita confirmar su id exacto antes de
+agregarlo (sinónimo, error de transcripción de voz), usa `search_products`;
+si no encuentra nada, lo dice con naturalidad en vez de inventar un plato.
 
-**RF-4 — Consulta de disponibilidad.** Con fechas y huéspedes identificados,
-el sistema consulta disponibilidad real (no el catálogo estático) y presenta
-como máximo 2 opciones de habitación, cada una con tarifa por noche y total
-de la estadía.
+**RF-4 — Toma de pedido.** El sistema agrega platos con cantidad al pedido
+en curso, permite corregir la cantidad de un plato ya agregado (o quitarlo
+por completo) y permite vaciar todo el pedido si el cliente lo pide
+explícitamente.
 
-**RF-5 — Rechazo de lo no disponible.** Si no hay habitaciones para las
-fechas o el número de huéspedes pedidos, el sistema lo dice con naturalidad
-y puede ofrecer intentar con otras fechas, sin inventar disponibilidad.
+**RF-5 — Principio del almuerzo ejecutivo.** Antes de agregar cualquier
+plato de la categoría ALMUERZO EJECUTIVO al pedido, el sistema pregunta el
+principio (frijoles, lentejas o pasta) y lo pasa a la tool; nunca lo asume
+ni lo deja vacío. Un principio ausente o distinto de esos tres valores es
+rechazado.
 
-**RF-6 — Confirmación explícita.** Una reserva solo se considera final
-cuando el cliente elige una de las opciones presentadas de forma explícita.
-Nunca se persiste antes de esa elección. La presentación de opciones y la
-confirmación deben sonar naturales, no como una lectura de datos: cantidades
-en palabras, nombre completo del tipo de habitación, y pluralización
-correcta (ej. "3 noches", "habitaciones dobles", no "3 de noche" ni
-"habitación doble" al referirse a varias).
+**RF-6 — Disponibilidad de especiales por día.** Si el cliente pide Ajiaco
+o Bandeja Paisa, el sistema verifica el día actual contra el día en que ese
+especial existe, y lo comunica con naturalidad si no coincide, ofreciendo el
+resto del menú en vez de inventar disponibilidad.
 
-**RF-7 — Nombre y teléfono de contacto.** Antes de confirmar, el agente
-siempre pregunta (uno a la vez) el nombre completo del huésped y un teléfono
-de contacto — nunca los asume ni los inventa, aunque el cliente los haya
-mencionado de pasada antes. `crear_reserva` los exige como parámetros
-obligatorios, así que estructuralmente no puede confirmarse una reserva sin
+**RF-7 — Confirmación explícita.** Un pedido solo se considera final cuando
+el cliente lo confirma explícitamente. Nunca se persiste antes de esa
+confirmación. La presentación del resumen y la confirmación deben sonar
+naturales, no como una lectura de datos: cantidades en palabras, nombre
+completo del plato, y pluralización correcta (ej. "2 lasagnas bolognesa",
+"3 chuletas de cerdo", nunca "2 de lasagna" ni "3 de chuleta").
+
+**RF-8 — Nombre y dirección de entrega.** Antes de confirmar, el agente
+siempre pregunta (uno a la vez) a nombre de quién queda el pedido y la
+dirección de entrega — nunca los asume ni los inventa, aunque el cliente los
+haya mencionado de pasada antes. `confirm_order` los exige como parámetros
+obligatorios, así que estructuralmente no puede confirmarse un pedido sin
 ambos.
 
-**RF-8 — Persistencia con integridad.** Al confirmar, la reserva se guarda
-con la tarifa de esa noche congelada, y la disponibilidad se revalida de
-forma consistente incluso si dos llamadas confirman al mismo tiempo sobre el
-mismo tipo de habitación y fechas solapadas.
+**RF-9 — Persistencia con integridad.** Al confirmar, el pedido se guarda
+con el precio de cada plato congelado, el stock se descuenta, y la
+disponibilidad se revalida de forma consistente incluso si dos llamadas
+confirman al mismo tiempo sobre el mismo plato.
 
 ## 4. Requisitos no funcionales
 
 **RNF-1 — Fluidez (prioridad máxima de esta fase).** El tiempo entre que el
 cliente termina de hablar y el agente empieza a responder (`e2e_latency`,
 ver `docs/ARQUITECTURA.md` § Observabilidad) debe mantenerse bajo, y ningún
-paso intermedio (consultar disponibilidad, crear la reserva) debe introducir
-un silencio perceptible sin que el agente diga algo mientras tanto. Parte de
+paso intermedio (buscar un plato, confirmar el pedido) debe introducir un
+silencio perceptible sin que el agente diga algo mientras tanto. Parte de
 esto es percepción, no solo latencia real: el agente usa ocasionalmente
 muletillas de transición variadas ("a ver, dame un segundo...", "déjame
 confirmo...") antes de una consulta o al confirmar, para sonar como una
@@ -132,15 +140,17 @@ descarta dejar que una excepción sin capturar llegue al LLM: el mensaje
 genérico de error de LiveKit Agents está en inglés — ver
 `docs/ARQUITECTURA.md` § Manejo de errores.)
 
-**RNF-4 — Aislamiento entre llamadas.** El estado de una reserva de una
+**RNF-4 — Aislamiento entre llamadas.** El estado de un pedido de una
 llamada nunca debe ser visible ni modificable desde otra llamada concurrente
 en el mismo proceso.
 
 **RNF-5 — Resiliencia ante fallas de base de datos.** Si Postgres no
 responde (conexión caída, timeout), ninguna tool debe dejar que el agente se
-caiga o quede en silencio: debe devolver un mensaje de respaldo en español
-que el agente pueda decir tal cual (ver `docs/ARQUITECTURA.md` § Manejo de
-errores, "Caída de Postgres").
+caiga o quede en silencio. `confirm_order` y `search_products` propagan el
+error de Postgres tal cual hoy (no tienen un mensaje de respaldo fijo como
+sí tenía la demo de hotel); si se retoma este proyecto en serio, agregar ese
+manejo explícito (`try/except (asyncpg.PostgresError, OSError)` con un
+mensaje en español) queda como pendiente — ver § 9.
 
 **RNF-6 — Configurabilidad para decidir con datos.** STT y LLM deben poder
 cambiarse por variable de entorno, para comparar alternativas sin editar
@@ -151,95 +161,118 @@ código (ver `scripts/bench_llm.py`). El TTS es la excepción intencional
 
 Formato: nombre — precondición — postcondición — modo de fallo.
 
-**`consultar_disponibilidad(fecha_entrada: str, fecha_salida: str, num_huespedes: int)`**
-- Precondición: `fecha_entrada`/`fecha_salida` en formato `AAAA-MM-DD`;
-  `fecha_salida` posterior a `fecha_entrada`; `num_huespedes >= 1`.
-- Postcondición: devuelve `{"disponible": bool, "opciones": [...], "resumen": str}`
-  con hasta 2 tipos de habitación ordenados por precio que tengan capacidad y
-  cupo suficiente para el rango de fechas (cada opción incluye `descripcion`
-  para que el agente pueda dar detalle si el cliente pregunta); `resumen` es
-  un texto ya pluralizado y formateado, listo para que el agente lo diga.
-  Guarda `fecha_entrada`, `fecha_salida` y `num_huespedes` en `ctx.userdata`.
-- Fallo: nunca lanza excepción; `disponible=False` con un mensaje en
-  `resumen` si las fechas son inválidas, si no hay cupo, o si Postgres no
-  responde (mensaje de respaldo, ver RNF-5).
+**`search_products(query: str)`**
+- Precondición: ninguna.
+- Postcondición: devuelve `{"found": bool, "products": [...]}` con hasta 5
+  coincidencias ordenadas por score de similitud (nombre, descripción o
+  `keywords`, vía `pg_trgm` + coincidencia exacta de substring).
+- Fallo: `found=False` con lista vacía si no hay coincidencias.
 
-**`crear_reserva(cliente_nombre: str, cliente_telefono: str, tipo_habitacion: str, fecha_entrada: str, fecha_salida: str, num_huespedes: int)`**
-- Precondición: `cliente_nombre` y `cliente_telefono` no pueden llegar
-  vacíos (se valida con `.strip()`); fechas válidas; el tipo de habitación
-  debe existir y tener capacidad para `num_huespedes`.
-- Postcondición: se crea una fila en `reservas` con la tarifa de esa noche
-  congelada (`precio_noche`); la respuesta incluye `reserva_id`, `total` y
-  `noches` para que el agente se lo confirme al cliente con sus palabras.
-- Fallo: `{"success": False, ...}` si faltan datos, el tipo de habitación no
-  existe, o la capacidad no alcanza. `ToolError` (en español) si, al
-  revalidar dentro de la transacción, el cupo ya no alcanza — caso de
-  carrera con otra llamada concurrente. Mensaje de respaldo (no excepción)
-  si Postgres no responde (RNF-5).
+**`add_item_to_order(product_id: int, quantity: int, principio: str | None = None)`**
+- Precondición: el plato debe existir y tener stock suficiente; si su
+  categoría es `almuerzo_ejecutivo`, `principio` debe venir y ser uno de
+  `frijoles`/`lentejas`/`pasta` (sin distinguir mayúsculas).
+- Postcondición: agrega el plato al `PedidoEnCurso` en `ctx.userdata` (suma
+  cantidad si el mismo plato con el mismo principio ya estaba); devuelve el
+  resumen del pedido y el total acumulado.
+- Fallo: nunca lanza excepción; `{"success": False, "message": "..."}` si el
+  plato no existe, no hay stock suficiente, o el principio falta/es
+  inválido para un almuerzo ejecutivo.
+
+**`set_item_quantity(product_id: int, quantity: int)`**
+- Precondición: `quantity >= 0`; si `quantity > 0` y el plato no estaba en
+  el pedido, debe existir y tener stock suficiente.
+- Postcondición: deja `quantity` como la cantidad final de ese plato en el
+  pedido (`quantity=0` lo quita por completo).
+- Fallo: `{"success": False, ...}` si `quantity < 0`, el plato no existe, no
+  hay stock suficiente, o se pide quitar (`quantity=0`) un plato que no
+  estaba en el pedido.
+
+**`vaciar_pedido()`**
+- Precondición: ninguna.
+- Postcondición: `PedidoEnCurso.items` queda vacío. No toca la base de
+  datos (el pedido nunca se había persistido).
+- Fallo: no aplica.
+
+**`confirm_order(customer_name: str, delivery_address: str)`**
+- Precondición: el pedido no puede estar vacío; `customer_name` y
+  `delivery_address` no pueden llegar vacíos (se valida con `.strip()`).
+- Postcondición: crea una fila en `orders` y una en `order_items` por cada
+  plato (con `unit_price` y `notes` congelados), descuenta `stock`, y limpia
+  `PedidoEnCurso.items`. La respuesta incluye `order_id`, `total` y
+  `eta_minutos` para que el agente lo confirme con sus palabras.
+- Fallo: `{"success": False, ...}` si el pedido está vacío o faltan
+  nombre/dirección. `ToolError` (en español) si, al revalidar dentro de la
+  transacción, el stock de algún plato ya no alcanza — caso de carrera con
+  otra llamada concurrente.
 
 ## 6. Modelo de datos (invariantes)
 
-- `reservas.precio_noche` es la tarifa en el momento de la reserva, no una
-  referencia a la tarifa actual de `habitaciones` — una reserva confirmada
-  no cambia de valor si el hotel ajusta tarifas después.
-- La disponibilidad de un tipo de habitación para un rango de fechas nunca
-  debe quedar negativa: `disponible - COUNT(reservas solapadas, no
-  canceladas)` se revalida dentro de la transacción de `crear_reserva` antes
-  de insertar (protegido con `SELECT ... FOR UPDATE`).
-- `reservas.cliente_nombre` y `reservas.cliente_telefono` son `NOT NULL`:
-  una reserva confirmada siempre tiene ambos, porque `crear_reserva` los
-  exige como parámetros y los valida antes de insertar (ver RF-7).
+- `order_items.unit_price` es el precio del plato en el momento del pedido,
+  no una referencia al precio actual de `products` — un pedido confirmado no
+  cambia de valor si el restaurante ajusta precios después.
+- `products.stock` nunca debe quedar negativo: se revalida dentro de la
+  transacción de `confirm_order` antes de descontarlo (protegido con
+  `SELECT ... FOR UPDATE`).
+- `orders.customer_name` y `orders.delivery_address` son `NOT NULL`: un
+  pedido confirmado siempre tiene ambos, porque `confirm_order` los exige
+  como parámetros y los valida antes de insertar (ver RF-8).
+- `order_items.notes` (principio del almuerzo ejecutivo) es `NULL` para
+  cualquier plato que no sea de esa categoría; para los que sí lo son, ya
+  fue validado como uno de `frijoles`/`lentejas`/`pasta` antes de llegar
+  aquí (RF-5), así que esta columna nunca guarda un valor libre o inválido.
 
 ## 7. Criterios de aceptación (escenarios de prueba)
 
 Guion mínimo que cualquier cambio a `agent.py` o `tools/` debe seguir
 pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
 
-1. Preguntar *"¿cuánto cuesta la suite?"* → responde sin invocar ninguna
-   tool (viene del catálogo en el prompt).
-2. Pedir disponibilidad para *"del 10 al 13 de marzo, para 2 personas"* →
-   el agente convierte las fechas a `AAAA-MM-DD`, llama
-   `consultar_disponibilidad` y presenta máximo 2 opciones con precio por
-   noche y total.
-3. Elegir una de las opciones y dar nombre y teléfono → el agente pregunta
-   ambos datos uno a la vez (no los asume aunque se hayan mencionado antes)
-   y confirma la reserva con `crear_reserva`.
-4. Pedir disponibilidad de Suite Presidencial del 10 al 15 de septiembre de
-   2026, o de Familiar del 12 al 14 (fechas que las reservas de ejemplo de
-   `database/schema.sql` dejan sin cupo) → rechazo con mensaje natural, sin
-   excepción ni silencio, y sin inventar disponibilidad.
-5. Pedir una cantidad de huéspedes mayor a la capacidad del tipo de
-   habitación elegido → rechazo con mensaje natural.
-6. Confirmar una reserva → se guarda en `reservas` con la tarifa correcta
-   congelada, y una segunda consulta a la base refleja exactamente lo
-   reservado (mismas fechas, mismo tipo de habitación, mismo cliente).
-7. Simular una caída de Postgres (parar el contenedor) y consultar
-   disponibilidad o crear una reserva → el agente dice el mensaje de
-   respaldo en español, no se cae ni se queda en silencio (RNF-5).
+1. Preguntar *"¿cuánto cuesta la lasagna mixta?"* → responde sin invocar
+   ninguna tool (viene del menú en el prompt).
+2. Pedir *"dos spaguettis carbonara y una lasagna bolognesa"* → el agente
+   agrega ambos platos y confirma cantidades con pluralización natural
+   ("2 spaguettis carbonara", no "2 de spaguetti").
+3. Pedir un almuerzo ejecutivo sin decir el principio → el agente pregunta
+   el principio (frijoles, lentejas o pasta) antes de agregarlo.
+4. Pedir Ajiaco un día que no es miércoles (o Bandeja Paisa un día que no es
+   viernes) → el agente lo dice con naturalidad y ofrece el resto del menú,
+   sin inventar disponibilidad.
+5. Corregir el pedido ("mejor que sean tres", "quíteme la lasagna") → el
+   agente usa `set_item_quantity` con la cantidad final correcta.
+6. Confirmar un pedido con nombre y dirección → el agente pregunta ambos
+   datos uno a la vez (no los asume aunque se hayan mencionado antes) y
+   confirma con `confirm_order`, mencionando el tiempo estimado de entrega.
+7. Confirmar un pedido → se guarda en `orders`/`order_items` con los precios
+   correctos congelados y el stock descontado; una segunda consulta a la
+   base refleja exactamente lo pedido (mismos platos, cantidades, principio).
+8. Pedir una cantidad de un plato mayor al stock disponible → rechazo con
+   mensaje natural, sin inventar disponibilidad.
 
-No existe todavía una suite automática de regresión para este dominio nuevo
-(la que existía era específica del dominio de restaurante y no aplica); es
-trabajo pendiente si se retoma el proyecto en serio (ver § 9).
+No existe todavía una suite automática de regresión para este menú (la que
+existía era específica del dominio de hotel y no aplica); es trabajo
+pendiente si se retoma el proyecto en serio (ver § 9).
 
 ## 8. Decisiones de producto ya tomadas (no reabrir sin pedirlo explícitamente)
 
 - La voz no se cambia (RNF-2).
-- El catálogo de tipos de habitación vive en el prompt, no en una tool —
-  mientras siga siendo un catálogo pequeño y estable dentro de una misma
-  llamada. La disponibilidad por fechas sí es una tool, porque eso cambia
-  durante la llamada.
+- El menú vive en el prompt, no en una tool — mientras siga siendo un menú
+  pequeño y estable dentro de una misma llamada. `search_products` sí es una
+  tool, porque confirmar el id exacto de un plato ambiguo no es algo que el
+  LLM deba adivinar del texto del prompt.
 - `gpt-4.1-mini` sigue siendo el LLM por defecto; cambiarlo es una decisión
   pendiente de quien compare calidad de respuesta, no solo latencia.
-- Cancelar/modificar reservas, check-in/checkout y pagos se dejan fuera a
-  propósito en esta fase — mantiene el alcance chico y la demo enfocada.
-  Nombre y teléfono de contacto sí se capturan (RF-7): son mínimos para que
-  la reserva sea contactable, no un dato "de más".
+- Cancelar/modificar pedidos confirmados y pagos en la llamada se dejan
+  fuera a propósito en esta fase — mantiene el alcance chico y la demo
+  enfocada. Nombre y dirección de entrega sí se capturan (RF-8): son
+  mínimos para que el pedido sea entregable, no un dato "de más".
+- Los precios en `database/schema.sql` son valores de referencia inventados
+  para la demo, no una lista de precios oficial de Macadamia.
 
 ## 9. Fuera de alcance, pero ya discutido — próximos pasos si se retoma
 
-Estos temas se conversaron en profundidad en la demo anterior (dominio de
-restaurante) y las decisiones/hallazgos siguen aplicando igual aquí, porque
-son de infraestructura de telefonía, no del dominio de negocio:
+Estos temas se conversaron en profundidad en fases anteriores del proyecto y
+las decisiones/hallazgos siguen aplicando igual aquí, porque son de
+infraestructura de telefonía o de robustez, no del dominio de negocio:
 
 - **Telefonía real (Colombia).** Requiere un trunk SIP (Claro/Movistar/Tigo
   ya ofrecen troncal SIP empresarial con NIT) o portar el número a un
@@ -253,14 +286,17 @@ son de infraestructura de telefonía, no del dominio de negocio:
 - **Aviso legal / Ley 1581 de 2012.** Ya existe el flag `AVISO_LEGAL` para
   activar el aviso de asistente virtual/grabación en el saludo; falta
   confirmar con un abogado si además se requiere registro ante la SIC.
-- **Portal de reservas.** La arquitectura ya soporta esto sin cambios: el
-  portal sería otro cliente leyendo la misma Postgres (o Supabase, si se
-  migra por realtime/dashboard gratis). No se requiere una API intermedia.
+- **Resiliencia ante caída de Postgres.** La demo de hotel sí implementaba
+  un mensaje de respaldo fijo (`MENSAJE_FALLBACK_DB`) para no dejar que el
+  agente se cayera o quedara en silencio si la base no respondía (RNF-5).
+  Esta rama todavía no lo reimplementó para `tools/products.py` ni
+  `tools/orders.py` — pendiente antes de un demo en vivo sin red de
+  respaldo.
 - **Captura del número del cliente.** Ya implementada de forma no bloqueante
   (`agent.py:_capturar_telefono_sip`, guarda en
-  `ReservaEnCurso.customer_phone_sip`); solo falta que exista una llamada
-  SIP real para ejercitarla. Es informativa: el agente igual pide un
-  teléfono de contacto explícito para la reserva (RF-7).
-- **Cancelar/modificar reservas.** `reservas.estado` ya deja el campo listo
-  (`confirmada` por defecto, el cálculo de disponibilidad ya excluye
-  `cancelada`), pero no existe ninguna tool que lo use todavía.
+  `PedidoEnCurso.customer_phone`); solo falta que exista una llamada SIP
+  real para ejercitarla, y decidir si `confirm_order` debe exigirlo como
+  parámetro obligatorio (hoy no lo hace).
+- **Cancelar/modificar pedidos.** `orders.status` deja el campo listo
+  (`'confirmed'` por defecto), pero no existe ninguna tool que lo use
+  todavía.

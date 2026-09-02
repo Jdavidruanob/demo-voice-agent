@@ -4,11 +4,11 @@ import { AccessToken } from "livekit-server-sdk";
 import { RoomAgentDispatch, RoomConfiguration } from "@livekit/protocol";
 import type { ConnectionDetails } from "@/lib/types";
 
-// Debe ser idéntico al agent_name="agente-hotel-reservas" registrado en
+// Debe ser idéntico al agent_name="agente-macadamia" registrado en
 // @server.rtc_session (agent.py) del lado del agente. Ese registro activa
 // "explicit dispatch": una sala nueva ya no dispara el agente sola, así que
 // el dispatch de abajo (roomConfig.agents) es lo que reemplaza ese paso.
-const AGENT_NAME = "agente-hotel-reservas";
+const AGENT_NAME = "agente-macadamia";
 
 export async function POST() {
   const livekitUrl = process.env.LIVEKIT_URL;
@@ -26,7 +26,7 @@ export async function POST() {
   }
 
   const participantIdentity = `cliente-${randomUUID().slice(0, 8)}`;
-  const roomName = `agente-hotel-reservas-${randomUUID().slice(0, 8)}`;
+  const roomName = `agente-macadamia-${randomUUID().slice(0, 8)}`;
 
   const accessToken = new AccessToken(apiKey, apiSecret, {
     identity: participantIdentity,

@@ -1,8 +1,8 @@
 """Compara el time-to-first-token (TTFT) de varios LLM candidatos.
 
 No usa AgentSession ni voz: llama directo al LLM con un prompt
-representativo de una reserva de hotel, para elegir LLM_MODEL con datos en
-vez de teoria. Los cuatro modelos estan confirmados en el catalogo de
+representativo de un pedido del restaurante, para elegir LLM_MODEL con datos
+en vez de teoria. Los cuatro modelos estan confirmados en el catalogo de
 `livekit.agents.inference.llm` de la version instalada.
 
 Uso:
@@ -25,15 +25,15 @@ MODELOS = [
 ]
 
 SYSTEM_PROMPT = (
-    "Eres la recepcionista telefónica de un hotel. Habla en español, con "
+    "Eres la toma-pedidos telefónica de un restaurante. Habla en español, con "
     "respuestas cortas y naturales para una llamada telefónica. Nunca "
-    "inventes tipos de habitación, tarifas ni disponibilidad."
+    "inventes platos, precios ni disponibilidad."
 )
 
-# Turno representativo: el cliente ya dio fechas y huespedes y pregunta el
-# total, que es justo el tipo de turno donde el TTFT se nota en la demo.
+# Turno representativo: el cliente ya dio un plato y pregunta el precio, que
+# es justo el tipo de turno donde el TTFT se nota en la demo.
 TURNO_DE_PRUEBA = (
-    "Quiero una habitación doble del 10 al 13 de marzo. ¿Cuánto sería el total?"
+    "Quiero dos lasagnas bolognesa. ¿Cuánto sería en total?"
 )
 
 REPETICIONES = 3

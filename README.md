@@ -1,8 +1,8 @@
-# Demo — Agente de voz para reservas de hotel
+# Demo — Agente de voz para Restaurante Macadamia
 
-Agente de voz construido con [LiveKit Agents](https://docs.livekit.io/agents/) que atiende
-llamadas de recepción de un hotel: escucha al cliente en español, consulta disponibilidad y
-tarifas en Postgres, y guarda la reserva cuando el cliente confirma.
+Agente de voz construido con [LiveKit Agents](https://docs.livekit.io/agents/) que toma
+pedidos telefónicos de Restaurante Macadamia: escucha al cliente en español, arma el pedido
+plato por plato y lo guarda en Postgres cuando el cliente confirma.
 
 > **Documentación completa:** [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) describe el
 > estado actual del sistema y por qué está construido así; [`docs/SPEC.md`](docs/SPEC.md)
@@ -21,8 +21,11 @@ LiveKit Inference ──  STT: deepgram/flux-general-multi (transcribe Y detecta
     │
     ▼
 Assistant (agent.py) ── function tools ──▶ Postgres
-                          consultar_disponibilidad
-                          crear_reserva
+                          search_products
+                          add_item_to_order
+                          set_item_quantity
+                          vaciar_pedido
+                          confirm_order
 ```
 
 Detalles de la conversación, pensados para que fluya como una llamada real y no
@@ -34,12 +37,12 @@ como un intercambio de turnos con pausas:
   vía `STT_MODEL` si Flux no convence en español-CO (ver `agent.py:_build_turn_pipeline`).
 - **`preemptive_tts` activo**: la síntesis de voz arranca antes de que el turno se
   confirme del todo, escondiendo buena parte de la latencia de la voz sin tocarla.
-- **Saludo instantáneo** con `session.say()` (sin pasar por el LLM) y **catálogo de tipos
-  de habitación inyectado en el prompt** al arrancar la sesión: sirve para responder
-  precio/capacidad sin gastar un roundtrip de tool. La disponibilidad real para fechas
-  concretas siempre pasa por `consultar_disponibilidad`.
-- **Fillers**: si una consulta a Postgres tarda más de 0.6s, el agente dice "a ver, reviso
-  disponibilidad..." en vez de dejar un silencio muerto.
+- **Saludo instantáneo** con `session.say()` (sin pasar por el LLM) y **menú completo
+  inyectado en el prompt** al arrancar la sesión: sirve para responder precio/composición
+  de cualquier plato sin gastar un roundtrip de tool. Los especiales del día (Ajiaco los
+  miércoles, Bandeja Paisa los viernes) llevan anotado si están disponibles hoy.
+- **Fillers**: si una búsqueda de plato tarda más de 0.6s, el agente dice "dame un
+  momento, reviso..." en vez de dejar un silencio muerto.
 - **VAD** con Silero y **cancelación de ruido** BVC, pensado para audio de teléfono.
 - **Métricas por turno**: cada turno loguea `[latencia]` con el end-to-end real
   (ver la sección de Latencia más abajo).
@@ -49,10 +52,10 @@ como un intercambio de turnos con pausas:
 ```
 agent.py                   Prompt del agente, sesión, pipeline de voz y métricas
 database/connection.py     Pool de conexiones a Postgres (singleton)
-database/schema.sql        Tablas (habitaciones, reservas) y tipos de habitación de ejemplo
-tools/habitaciones.py      consultar_disponibilidad, build_catalogo_prompt_block,
-                           build_servicios_prompt_block
-tools/reservas.py          ReservaEnCurso + crear_reserva
+database/schema.sql        Tablas (products, orders, order_items) y menú de Macadamia
+tools/products.py          search_products, build_menu_prompt_block
+tools/orders.py            PedidoEnCurso + add_item_to_order, set_item_quantity,
+                           vaciar_pedido, confirm_order
 tools/formato.py           Pluralización en español para los textos que arman las tools
 scripts/bench_llm.py       Compara TTFT entre LLM candidatos con datos reales
 docker-compose.yml         Postgres 17 para desarrollo local
@@ -74,7 +77,7 @@ npm run dev
 
 Abre `http://localhost:3000`, dale a "Iniciar llamada" y acepta el permiso de micrófono.
 `app/api/token/route.ts` firma el access token en el servidor y agrega el dispatch
-explícito hacia `agent_name="agente-hotel-reservas"` (ver `docs/ARQUITECTURA.md` §
+explícito hacia `agent_name="agente-macadamia"` (ver `docs/ARQUITECTURA.md` §
 Telefonía) — sin eso, la sala se crea pero el agente nunca entra.
 
 ## Requisitos
@@ -100,16 +103,15 @@ cp .env.example .env
 
 Completa `LIVEKIT_URL`, `LIVEKIT_API_KEY` y `LIVEKIT_API_SECRET` con las credenciales de
 tu proyecto en LiveKit Cloud (Settings → Keys). Las variables de base de datos ya vienen
-con los valores que levanta `docker-compose.yml`. `RECEPTIONIST_NAME` y `HOTEL_NAME`
-cambian el nombre que dice el agente en el saludo y en el prompt. `LLM_MODEL` y
-`STT_MODEL` son opcionales (traen default); la voz (TTS) no es configurable por env a
-propósito, ver más abajo.
+con los valores que levanta `docker-compose.yml`. `RESTAURANT_NAME` cambia el nombre que
+dice el agente en el saludo y en el prompt. `LLM_MODEL` y `STT_MODEL` son opcionales
+(traen default); la voz (TTS) no es configurable por env a propósito, ver más abajo.
 
 **3. Levantar Postgres y cargar el esquema**
 
 ```bash
 docker compose up -d
-docker compose exec -T postgres psql -U admin -d hotel_reservas < database/schema.sql
+docker compose exec -T postgres psql -U admin -d macadamia < database/schema.sql
 ```
 
 **4. Descargar los modelos locales** (VAD y detección de turno, solo la primera vez)
@@ -130,7 +132,7 @@ uv run agent.py dev
 
 Con `dev`, conéctate desde cualquier cliente de LiveKit — por ejemplo el
 [Agents Playground](https://agents-playground.livekit.io) — usando el mismo proyecto e
-indicando `agente-hotel-reservas` como agent name (ver `docs/ARQUITECTURA.md` §
+indicando `agente-macadamia` como agent name (ver `docs/ARQUITECTURA.md` §
 Telefonía), o usa el cliente web de prueba de arriba, que ya lo hace por ti.
 
 ## Latencia
@@ -151,21 +153,21 @@ Para elegir `LLM_MODEL` con datos en vez de teoría:
 uv run python scripts/bench_llm.py
 ```
 
-Mide el time-to-first-token de varios candidatos con un turno representativo de reserva
-de hotel (sin voz, solo el LLM).
+Mide el time-to-first-token de varios candidatos con un turno representativo de pedido
+del restaurante (sin voz, solo el LLM).
 
 ## Notas
 
 - `.env` está en `.gitignore` a propósito: nunca subas tus claves al repositorio.
-- La reserva en curso vive en `session.userdata` (`ReservaEnCurso`, en `tools/reservas.py`),
+- El pedido en curso vive en `session.userdata` (`PedidoEnCurso`, en `tools/orders.py`),
   no en un global de módulo: cada llamada tiene su propio estado, así que dos llamadas
   simultáneas en el mismo proceso nunca se mezclan.
 - Las credenciales del `docker-compose.yml` (`admin` / `password`) son solo para
   desarrollo local.
-- Si tenías la base de datos cargada con el esquema anterior (restaurante), bórrala antes
-  de cargar el nuevo esquema — las tablas cambiaron de nombre y de forma:
+- Si tenías la base de datos cargada con el esquema de la demo de hotel, bórrala antes de
+  cargar el nuevo esquema — las tablas cambiaron de nombre y de forma:
   ```bash
-  docker compose exec -T postgres psql -U admin -d hotel_reservas \
-    -c "DROP TABLE IF EXISTS order_items, orders, products, reservas, habitaciones CASCADE;"
-  docker compose exec -T postgres psql -U admin -d hotel_reservas < database/schema.sql
+  docker compose exec -T postgres psql -U admin -d macadamia \
+    -c "DROP TABLE IF EXISTS order_items, orders, products, reservas, habitaciones, servicios_hotel CASCADE;"
+  docker compose exec -T postgres psql -U admin -d macadamia < database/schema.sql
   ```

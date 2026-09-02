@@ -22,8 +22,9 @@ necesidad de que te lo recuerden cada vez.
 
 ## Sobre este proyecto
 
-Agente de voz en español (LiveKit Agents) que toma pedidos para una cadena de
-restaurantes de pollo. Es una **demo comercial**: la prioridad es que la
+Agente de voz en español (LiveKit Agents) que toma pedidos telefónicos para
+Restaurante Macadamia (lasagnas, spaguettis, arroces, especiales del día y
+almuerzos ejecutivos). Es una **demo comercial**: la prioridad es que la
 conversación se sienta fluida y natural, no acumular funcionalidades.
 
 Antes de trabajar en el código, lee:
