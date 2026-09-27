@@ -85,14 +85,20 @@ palabras, nombre completo del producto, y pluralización cuando la cantidad es
 mayor a uno (ej. "dos Coca-Colas y una hamburguesa", no "2 de Coca-Cola y 1
 de hamburguesa").
 
-**RF-7 — Rechazo de lo inexistente.** Si el cliente pide algo que no está en
-el menú o una cantidad que excede el stock disponible, el sistema lo dice con
-naturalidad, sin inventar disponibilidad ni productos.
+**RF-7 — Rechazo de lo inexistente y de lo agotado.** Si el cliente pide algo
+que no está en el menú, el sistema lo dice sin inventar. Si pide algo que
+existe pero está **agotado hoy**, dice "hoy no tenemos" —no "no existe"— y
+ofrece algo parecido: lo segundo suena a que el restaurante no lo vende.
 
-**RF-8 — Persistencia con integridad.** Al confirmar, el pedido se guarda de
-forma atómica (todo o nada), con el total correcto, y el stock se descuenta
-de forma consistente incluso si dos llamadas confirman al mismo tiempo sobre
-el mismo producto.
+**RF-8 — Persistencia con integridad.** Al confirmar, el pedido se guarda en el
+sistema de Brasa & Pan de forma atómica (todo o nada) y con el total resuelto
+por el servidor. Si algo del pedido no se puede cobrar, **no se guarda nada**:
+un cliente que pidió tres cosas por teléfono y recibe dos no se enteró de nada.
+Confirmar dos veces la misma llamada no crea dos comandas.
+
+**RF-8b — Nada se convierte en una promesa falsa.** Si el pedido no se pudo
+guardar, al cliente se le dice eso y se le da el WhatsApp del restaurante. El
+pedido completo queda en los logs para poder recuperarlo.
 
 **RF-9 — Nombre, dirección y tiempo de entrega.** Antes de confirmar, el
 agente siempre pregunta (uno a la vez) a nombre de quién queda el pedido y la
@@ -170,52 +176,75 @@ código (ver `scripts/bench_llm.py`). El TTS es la excepción intencional
 
 Formato: nombre — precondición — postcondición — modo de fallo.
 
+Los productos se identifican por **SKU** (el código entre corchetes del menú),
+no por un id numérico: es lo que devuelve el catálogo del sistema de pedidos y
+lo que el agente ve en su prompt.
+
 **`search_products(query: str)`**
-- Precondición: ninguna.
+- Precondición: el catálogo cargado en `userdata` (lo está, o la llamada no
+  habría arrancado).
 - Postcondición: devuelve `{"found": bool, "products": [...]}` con hasta 5
-  coincidencias ordenadas por similitud.
+  coincidencias. Cada una trae `sku`, `precio` (el de hoy), `disponible` y
+  `preguntar` con los grupos obligatorios y sus ids.
 - Fallo: nunca lanza excepción; `found=False` si no hay coincidencias.
+- Es un **respaldo**, no el camino principal: el menú completo ya está en el
+  prompt. Sirve para lo ambiguo y para los errores de transcripción.
 
-**`add_item_to_order(product_id: int, quantity: int)`**
-- Precondición: el producto debe existir y tener stock suficiente contando
-  lo que ya llevaba pedido ese mismo producto.
-- Postcondición: el item se agrega (o se suma a la cantidad existente si el
-  producto ya estaba en el pedido); devuelve el pedido completo y el total
-  corriente.
-- Fallo: `{"success": False, "message": "..."}` en español si el producto no
-  existe o no hay stock — nunca una excepción.
+**`add_item_to_order(sku: str, quantity: int, option_ids: list[int])`**
+- Precondición: el producto existe, está `disponible`, y `option_ids` cubre
+  **todos** sus grupos obligatorios.
+- Postcondición: el item se agrega (o se suma a la cantidad existente si ya
+  estaba con las mismas opciones); devuelve el pedido y el subtotal parcial.
+- Fallo: `{"success": False, "message": "..."}` en español — nunca una
+  excepción. Si faltan grupos obligatorios, el mensaje **nombra todos los que
+  faltan** con sus opciones, y la respuesta trae `falta_preguntar`. Se
+  devuelven todos y no solo el primero porque una hamburguesa pide dos cosas
+  (término y acompañamiento): nombrando uno, el agente preguntaría, volvería a
+  fallar, y el cliente oiría dos silencios en vez de dos preguntas seguidas.
+- Una opción que no pertenece al producto se descarta en silencio, igual que
+  hace el servidor: un id viejo no puede reventar la llamada.
 
-**`set_item_quantity(product_id: int, quantity: int)`**
+**`set_item_quantity(sku: str, quantity: int)`**
 - Precondición: `quantity >= 0`. Si `quantity > 0` y el producto no estaba en
-  el pedido, se comporta como agregarlo (mismas validaciones de stock).
-- Postcondición: la cantidad de ese producto en el pedido queda exactamente
-  en `quantity`; `quantity=0` lo elimina del pedido.
-- Fallo: mensaje en español si `quantity < 0`, si el producto no existe, o si
-  no hay stock suficiente.
+  el pedido, se comporta como agregarlo.
+- Postcondición: la cantidad de ese producto queda exactamente en `quantity`;
+  `quantity=0` lo elimina.
+- Fallo: mensaje en español si `quantity < 0` o si el producto no existe. Si
+  el mismo producto está dos veces con personalizaciones distintas, **no
+  adivina**: pide que se le pregunte al cliente a cuál se refiere.
 
 **`vaciar_pedido()`**
 - Precondición: ninguna.
-- Postcondición: el pedido en curso queda vacío. No toca la base de datos.
+- Postcondición: el pedido en curso queda vacío. No manda nada al servidor.
 - Fallo: no aplica.
 
-**`confirm_order(customer_name: str, delivery_address: str)`**
-- Precondición: el pedido en curso tiene al menos un item; `customer_name` y
-  `delivery_address` no pueden llegar vacíos (se valida con `.strip()`) — el
-  agente debe haberlos preguntado antes de llamar la tool.
-- Postcondición: se crea una fila en `orders` (con `total`, `customer_name`,
-  `delivery_address` y `customer_phone` si existe) y una fila por item en
-  `order_items` (con `unit_price` congelado); el stock de cada producto queda
-  descontado; el pedido en curso se vacía; `userdata.order_id` queda con el
-  id de la orden creada; la respuesta incluye `eta_minutos` para que el
-  agente se lo diga al cliente.
-- Fallo: `{"success": False, ...}` si el pedido está vacío o si falta nombre
-  o dirección. `ToolError` (en español) si, al revalidar dentro de la
-  transacción, el stock ya no alcanza — caso de carrera con otra llamada
-  concurrente.
+**`confirm_order(customer_name, delivery_address, phone, payment_method)`**
+- Precondición: el pedido tiene al menos un item; `customer_name` y
+  `delivery_address` no pueden llegar vacíos; `payment_method` es
+  `efectivo`, `transferencia` o `datafono`. `phone` **sí puede ir vacío**: una
+  llamada web no trae número y el cliente puede no querer darlo.
+- Postcondición: `POST /api/internal/voice-order` crea el pedido en el sistema
+  de Brasa & Pan (estado *Nuevo*, `source="call"`), el pedido en curso se
+  vacía, `userdata.order_code` queda con el código, y la respuesta trae el
+  **total del servidor** y el tiempo de entrega para que el agente los diga.
+- Fallo, tres casos distintos y con salidas distintas:
+  - **422 (`PedidoRechazado`)**: algo no se puede cobrar (agotado, falta un
+    grupo obligatorio). Devuelve `success: False` con el motivo en español
+    para que el agente lo resuelva con el cliente y vuelva a confirmar. No se
+    creó nada.
+  - **Caído (`PedidosCaido`)**: dos reintentos con backoff; si sigue fallando,
+    `success: False` con el guion del respaldo de WhatsApp, se marca
+    `respaldo_dado` y se loguea `[pedido-no-guardado]` con el pedido completo.
+    **No se le dice al cliente que el pedido quedó.**
+  - **Repetido**: el mismo `call_id` devuelve el mismo pedido con
+    `duplicated: true`. Es idempotencia, no error.
 
 **`finalizar_llamada(despedida)`**
-- Precondición: `userdata.order_id` no es `None` (ya se confirmó un pedido en
-  esta llamada).
+- Precondición: `userdata.order_code` no es `None` (se confirmó un pedido)
+  **o** `userdata.respaldo_dado` es `True` (el sistema se cayó y ya se le dijo
+  al cliente que escriba por WhatsApp). Son dos caminos y no uno a propósito:
+  con el sistema caído, `order_code` nunca se llena y el agente se quedaría
+  **sin poder despedirse**, repitiendo el error mientras el cliente espera.
 - Postcondición: dice `despedida` con `session.say()`, espera a que termine
   de sonar (`wait_for_playout()`), agrega un colchón fijo de 1.5s y cierra la
   sala (`job_ctx.delete_room()`). No hay retorno útil para el agente: la
@@ -229,21 +258,26 @@ Formato: nombre — precondición — postcondición — modo de fallo.
   antes) es lo que hace que el navegador reciba `Disconnected` al instante y
   su interfaz vuelva sola al estado inicial; matando el proceso, el cliente
   se quedaba "en llamada" hasta que LiveKit notara el timeout.
-- Fallo: `{"success": False, "message": "..."}` si no hay ningún pedido
-  confirmado todavía — no cierra nada en ese caso.
+- Fallo: `{"success": False, "message": "..."}` si no hay pedido confirmado ni
+  respaldo dado — no cierra nada en ese caso.
 
-## 6. Modelo de datos (invariantes)
+## 6. Invariantes del contrato con el sistema de pedidos
 
-- `order_items.unit_price` es el precio en el momento del pedido, no una
-  referencia al precio actual de `products` — un pedido confirmado no cambia
-  de valor si el restaurante ajusta precios después.
-- `orders.total` siempre es igual a `sum(order_items.quantity * order_items.unit_price)`
-  para ese pedido. Se calcula en Python al confirmar, no se recalcula después.
-- El stock de un producto nunca debe quedar negativo. Se protege con
-  `SELECT ... FOR UPDATE` dentro de la transacción de `confirm_order`.
-- `orders.customer_name` y `orders.delivery_address` son `NOT NULL`: un
-  pedido confirmado siempre tiene ambos, porque `confirm_order` los exige
-  como parámetros y los valida antes de insertar (ver RF-9).
+No hay base de datos en este repo. Lo que hay que sostener es esto:
+
+- **El agente nunca manda una cifra.** Solo `{sku, optionIds, quantity}`. El
+  precio, las promociones y el total los calcula el sistema de pedidos contra
+  su base. Es la regla que hace aceptable que un pedido nazca de una
+  conversación (ADR-13 en `demo-delivery-system`).
+- **El total que se dice en voz alta es el de la respuesta de
+  `confirm_order`**, no el que sumó el agente.
+- **`call_id` es el `room_name` y no se regenera dentro de una llamada.** Es lo
+  único que evita que un `confirm_order` repetido mande la comanda dos veces a
+  la cocina.
+- **Un fallo nunca se convierte en una promesa.** Si el pedido no quedó
+  guardado, al cliente se le dice eso y se le da el WhatsApp. Jamás "ya quedó".
+- **Las dos copias de `AGENT_NAME` (`agent.py` y `web/main.py`) son el mismo
+  valor.** Lo comprueba `scripts/verify_contrato.py`.
 
 ## 7. Criterios de aceptación (escenarios de prueba)
 
@@ -253,27 +287,36 @@ pasando, por voz (`uv run agent.py console`) y/o contra la base directamente:
 1. Preguntar *"¿qué tienen para tomar?"* → responde sin invocar ninguna tool.
 2. Pedir *"un combo familiar y una gaseosa"* → dos items en el pedido, con
    precio y total correctos.
-3. Pedir *"un polo asado"* (con error de transcripción) → identifica Pollo
-   Asado vía `search_products`.
+3. Pedir algo con error de transcripción (ej. *"asado de cotilla"*) → lo
+   identifica vía `search_products`, o pregunta cuál de las coincidencias.
 4. Decir *"ay no, quíteme la gaseosa"* → el item se quita; el agente no
    miente ni se traba. **(Este escenario era el bug #1 antes de esta rama.)**
 5. Preguntar *"¿cuánto es el total?"* → cifra exacta, calculada, nunca
    estimada de cabeza por el LLM.
-6. Pedir una cantidad mayor al stock disponible → rechazo con mensaje
-   natural, sin excepción ni silencio.
+6. Pedir un producto agotado → el agente dice que hoy no hay y ofrece
+   alternativa, sin excepción ni silencio.
+6b. Pedir una hamburguesa → el agente pregunta **término de la carne** y
+   **acompañamiento** (uno a la vez) antes de agregarla, porque sin eso la
+   cocina no la puede preparar. No enumera los extras opcionales.
 7. Pedir un producto inexistente (ej. "una hamburguesa") → lo dice con
    naturalidad, sin inventar.
-8. Confirmar el pedido → el agente pregunta nombre y dirección antes de
-   usar `confirm_order` (no los asume aunque se hayan mencionado antes),
-   repite ambos juntos y espera confirmación explícita antes de llamar la
-   tool; se guarda en `orders`/`order_items` con
-   `customer_name`/`delivery_address`, el stock se descuenta, el agente
-   informa un tiempo de entrega estimado, y una segunda consulta a la base
-   refleja exactamente lo pedido.
+8. Confirmar el pedido → el agente pregunta **nombre, dirección, celular y
+   forma de pago** antes de usar `confirm_order` (uno a la vez, y no los asume
+   aunque se hayan mencionado antes), repite nombre y dirección juntos y espera
+   confirmación explícita antes de llamar la tool; la comanda aparece en el
+   portal de Brasa & Pan en "Nuevos" con su badge 📞, con las opciones en el
+   renglón y el total correcto.
    **(Este escenario era el bug reportado en vivo: el agente confirmaba sin
    pedir nombre ni dirección — corregido haciendo ambos parámetros
    obligatorios de `confirm_order` y exigiendo en el prompt que se repitan
    juntos y se confirmen antes de llamarla.)**
+8b. Bajar el sistema de pedidos y confirmar → el agente **no dice que el
+   pedido quedó**: dice que se le cayó el sistema, da el WhatsApp, y **puede
+   colgar** (no se queda repitiendo el error).
+8c. Cargar la página con el sistema de pedidos caído → el botón queda
+   deshabilitado y se ve el WhatsApp, sin dejar entrar a la llamada.
+8d. Cambiar `AGENT_NAME` solo en un archivo → a los 12 segundos la página
+   muestra el respaldo, en vez de quedarse en "Conectando…" para siempre.
 9. Al repetir nombre y dirección juntos, decir *"no, el nombre está mal, es
    [apellido]"* → el agente corrige el dato y vuelve a repetir la
    confirmación con el valor corregido, sin llamar a `confirm_order` todavía.

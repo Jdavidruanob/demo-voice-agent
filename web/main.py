@@ -15,15 +15,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+import httpx
 from livekit import api
 
 load_dotenv()
 
-# Debe coincidir exactamente con el agent_name de @server.rtc_session en
-# agent.py. Como ese decorador usa despacho explicito (no automatico), sin
-# este nombre en el RoomAgentDispatch del token la sala quedaria vacia: el
-# cliente se conectaria pero ningun agente le contestaria.
-AGENT_NAME = "agente-pollo"
+# Debe coincidir exactamente con el AGENT_NAME de agent.py. Como ese decorador
+# usa despacho explicito (no automatico), sin este nombre en el
+# RoomAgentDispatch del token la sala quedaria vacia: el cliente se conectaria
+# y ningun agente le contestaria, SIN ningun error visible. Si se cambia aca,
+# hay que cambiarlo alla en el mismo commit.
+AGENT_NAME = "agente-brasa"
+
+# El numero al que se manda al cliente cuando la llamada no puede terminar en
+# pedido. La pagina lo usa en los tres caminos de respaldo.
+WHATSAPP_RESPALDO = os.getenv("BUSINESS_WHATSAPP_NUMBER", "")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -42,8 +48,8 @@ def crear_token():
     Cada llamada usa una sala nueva (un cliente = una llamada), igual que una
     llamada telefonica real no comparte linea con otra. El RoomAgentDispatch
     incluido en el propio token es lo que le pide a LiveKit que despache
-    "agente-pollo" a la sala apenas el cliente entre, sin necesidad de una
-    llamada aparte a la API de LiveKit para crear el dispatch.
+    AGENT_NAME a la sala apenas el cliente entre, sin necesidad de una llamada
+    aparte a la API de LiveKit para crear el dispatch.
     """
     api_key = os.getenv("LIVEKIT_API_KEY")
     api_secret = os.getenv("LIVEKIT_API_SECRET")
@@ -54,7 +60,10 @@ def crear_token():
             detail="Faltan LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET en el entorno.",
         )
 
-    room_name = f"pedido-{_codigo_corto()}"
+    # El nombre de la sala es lo que el agente manda como `callId` al crear el
+    # pedido: es unico por llamada, y es lo que evita que un `confirm_order`
+    # repetido duplique la comanda.
+    room_name = f"brasa-{_codigo_corto()}"
     identity = f"cliente-{_codigo_corto()}"
 
     token = (
@@ -72,6 +81,43 @@ def crear_token():
         "roomName": room_name,
         "participantToken": token.to_jwt(),
     }
+
+
+@app.get("/api/estado")
+async def estado():
+    """¿Se puede tomar un pedido por llamada ahora mismo?
+
+    La pagina lo consulta ANTES de dejar llamar. Si el sistema de pedidos no
+    responde, el boton queda deshabilitado y se muestra el WhatsApp: es mejor
+    no dejar entrar a una llamada de cuatro minutos que no puede terminar en un
+    pedido, que dejar al cliente contarle todo a un agente que no va a poder
+    guardarlo.
+
+    Nunca falla con 500: la respuesta siempre es un `ok` que la pagina pueda
+    leer. Un error aca dejaria la pagina sin saber que hacer, que es peor que
+    un "no".
+    """
+    return {"ok": await _pedidos_arriba(), "whatsapp": WHATSAPP_RESPALDO}
+
+
+async def _pedidos_arriba() -> bool:
+    """La misma comprobacion que hace `brasa/api.py`, repetida a proposito.
+
+    Este servicio se construye con `web/` como contexto de build (Root
+    Directory en Railway), asi que no puede importar `brasa/`. Acoplar los dos
+    contextos para no repetir seis lineas de un GET saldria mas caro que
+    repetirlas: el servicio web es deliberadamente autonomo — sirve la pagina y
+    mintea tokens, nada mas.
+    """
+    base = (os.getenv("DELIVERY_API_URL") or "").rstrip("/")
+    if not base:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as cliente:
+            r = await cliente.get(f"{base}/api/health")
+            return r.status_code == 200 and r.json().get("ok") is True
+    except Exception:  # noqa: BLE001 - cualquier fallo es "no esta arriba"
+        return False
 
 
 # Al final: cualquier ruta que no sea /api/* sirve la pagina estatica

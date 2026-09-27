@@ -22,9 +22,15 @@ necesidad de que te lo recuerden cada vez.
 
 ## Sobre este proyecto
 
-Agente de voz en español (LiveKit Agents) que toma pedidos para una cadena de
-restaurantes de pollo. Es una **demo comercial**: la prioridad es que la
+Agente de voz en español (LiveKit Agents) que toma pedidos para **Brasa & Pan**
+(rama `brasa-y-pan`). Es una **demo comercial**: la prioridad es que la
 conversación se sienta fluida y natural, no acumular funcionalidades.
+
+**Este repo no tiene base de datos.** El catálogo y los pedidos viven en
+`demo-delivery-system` (`~/code/demo-delivery-system`) y se consultan por HTTP
+desde `brasa/api.py`. Un pedido cerrado hablando aparece en el portal de ese
+sistema. La decisión de fondo —por qué se permite que un pedido nazca de una
+conversación— está en su `docs/DECISIONS.md`, ADR-13.
 
 Antes de trabajar en el código, lee:
 - [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) — cómo funciona el sistema hoy y por qué.
@@ -38,7 +44,19 @@ Convenciones ya establecidas en el código, para mantener consistencia:
   ya tomada: no se cambia salvo instrucción explícita y nueva.
 - El estado de un pedido vive en `session.userdata`, nunca en una variable
   global de módulo (ver `docs/ARQUITECTURA.md` § Estado del pedido).
-- Los errores de negocio esperables (producto inexistente, sin stock) se
-  devuelven como `{"success": False, "message": "..."}`, no como excepciones.
-  Solo se usa `ToolError` (nunca una excepción genérica) para el caso
-  inesperado que sí debe llegar al LLM como mensaje en español.
+- Los errores de negocio esperables (producto inexistente, agotado, falta el
+  término de la carne) se devuelven como `{"success": False, "message": "..."}`,
+  no como excepciones. Solo se usa `ToolError` (nunca una excepción genérica)
+  para el caso inesperado que sí debe llegar al LLM como mensaje en español.
+
+Tres reglas propias de esta rama:
+
+- **El agente nunca manda una cifra al sistema de pedidos.** Solo SKUs, ids de
+  opción y cantidades; el precio y el total los resuelve el servidor. Es lo que
+  hace aceptable que un pedido nazca de una llamada.
+- **Un fallo nunca se convierte en una promesa.** Si el pedido no se guardó, al
+  cliente se le dice eso y se le da el WhatsApp del restaurante. Jamás "ya
+  quedó".
+- **`AGENT_NAME` está en dos archivos** (`agent.py` y `web/main.py`) y tienen
+  que ser idénticos. Si no, la sala queda vacía **sin ningún error**. Corre
+  `uv run python scripts/verify_contrato.py` antes de cualquier commit.

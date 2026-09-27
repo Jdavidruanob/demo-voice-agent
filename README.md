@@ -1,8 +1,13 @@
-# Demo — Agente de voz para tomar pedidos
+# Demo — Agente de voz para tomar pedidos (Brasa & Pan)
 
 Agente de voz construido con [LiveKit Agents](https://docs.livekit.io/agents/) que atiende
-llamadas de una cadena de restaurantes de pollo: escucha al cliente en español, consulta el
-menú en Postgres, arma el pedido y lo guarda cuando el cliente lo confirma.
+llamadas de **Brasa & Pan**: escucha al cliente en español, arma el pedido y, cuando el
+cliente lo confirma, la comanda aparece en el portal del restaurante
+(`demo-delivery-system`) igual que una que entró por el menú web.
+
+> **Esta rama no tiene base de datos propia.** El catálogo y los pedidos viven en el
+> sistema de pedidos y se consultan por HTTP (`brasa/api.py`). La rama `pedidos` es la
+> versión anterior, con su propia Postgres de 4 productos de pollo.
 
 > **Documentación completa:** [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) describe el
 > estado actual del sistema y por qué está construido así; [`docs/SPEC.md`](docs/SPEC.md)
@@ -20,12 +25,13 @@ LiveKit Inference ──  STT: deepgram/flux-general-multi (transcribe Y detecta
                       TTS: deepgram/aura-2 (voz "celeste", es-CO — fija, no se cambia)
     │
     ▼
-Assistant (agent.py) ── function tools ──▶ Postgres
-                          search_products
-                          add_item_to_order
+Assistant (agent.py) ── function tools ──▶ brasa/api.py ──HTTP──▶ Sistema de pedidos
+                          search_products                            GET  /api/internal/catalog
+                          add_item_to_order                          POST /api/internal/voice-order
                           set_item_quantity
-                          vaciar_pedido
+                          vaciar_pedido                         ──▶ Portal: comanda en "Nuevos" 📞
                           confirm_order
+                          finalizar_llamada
 ```
 
 Detalles de la conversación, pensados para que fluya como una llamada real y no
@@ -43,9 +49,15 @@ como un intercambio de turnos con pausas:
 - **Fillers**: si `search_products` tarda más de 0.6s, el agente dice "dame un momento,
   reviso..." en vez de dejar un silencio muerto.
 - **VAD** con Silero y **cancelación de ruido** BVC, pensado para audio de teléfono.
-- **Búsqueda tolerante a errores**: `search_products` usa la extensión `pg_trgm` de
-  Postgres más una columna de `keywords`, así que entiende sinónimos ("gaseosa" →
-  Coca-Cola) y transcripciones imperfectas ("polo asado" → Pollo Asado).
+- **Búsqueda tolerante a errores**: `search_products` busca en el catálogo que ya está
+  en memoria (coincidencia literal primero, `difflib` después), así que tolera
+  transcripciones imperfectas sin un viaje a la base.
+- **El agente nunca calcula un precio**: manda SKUs y cantidades; el total lo resuelve el
+  servidor. Si una promoción se vence a mitad de llamada, el número que se dice en voz
+  alta y el que queda en la comanda son el mismo.
+- **Tres respaldos, todos terminando en WhatsApp**: antes de llamar, al arrancar la
+  llamada y al confirmar. Si el pedido no se guardó, al cliente se le dice eso — nunca
+  "ya quedó" (ver `docs/ARQUITECTURA.md` § Cuando algo falla).
 - **Métricas por turno**: cada turno loguea `[latencia]` con el end-to-end real
   (ver la sección de Latencia más abajo).
 
@@ -53,11 +65,12 @@ como un intercambio de turnos con pausas:
 
 ```
 agent.py                 Prompt del agente, sesión, pipeline de voz y métricas
-database/connection.py   Pool de conexiones a Postgres (singleton)
-database/schema.sql      Tablas, índices trigram y productos de ejemplo
-tools/products.py        search_products, build_menu_prompt_block
+brasa/api.py             Cliente HTTP del sistema de pedidos (catálogo y confirmación)
+brasa/catalogo.py        El catálogo en memoria + el bloque de menú del prompt
+tools/products.py        search_products
 tools/orders.py          PedidoEnCurso + add_item_to_order, set_item_quantity,
                          vaciar_pedido, confirm_order
+scripts/verify_contrato.py  Lo que se rompe en silencio (el AGENT_NAME, sobre todo)
 tools/call.py            finalizar_llamada (cierra la llamada tras la despedida)
 scripts/bench_llm.py     Compara TTFT entre LLM candidatos con datos reales
 docker-compose.yml       Postgres 17 para desarrollo local
@@ -88,16 +101,22 @@ cp .env.example .env
 ```
 
 Completa `LIVEKIT_URL`, `LIVEKIT_API_KEY` y `LIVEKIT_API_SECRET` con las credenciales de
-tu proyecto en LiveKit Cloud (Settings → Keys). Las variables de base de datos ya vienen
-con los valores que levanta `docker-compose.yml`. `LLM_MODEL` y `STT_MODEL` son opcionales
+tu proyecto en LiveKit Cloud (Settings → Keys). `LLM_MODEL` y `STT_MODEL` son opcionales
 (traen default); la voz (TTS) no es configurable por env a propósito, ver más abajo.
 
-**3. Levantar Postgres y cargar el esquema**
+**3. Apuntar al sistema de pedidos**
 
-```bash
-docker compose up -d
-docker compose exec -T postgres psql -U admin -d chicken_store < database/schema.sql
+En el mismo `.env`:
+
 ```
+DELIVERY_API_URL=https://<la-app-del-menu>.vercel.app
+INTERNAL_SECRET=<el MISMO valor que tienen las apps del sistema de pedidos>
+BUSINESS_WHATSAPP_NUMBER=57...
+```
+
+`INTERNAL_SECRET` tiene que coincidir exactamente, o el catálogo responde 401 y la llamada
+no arranca (el agente lo dice y manda al WhatsApp, no se queda callado). Para trabajar
+contra el sistema corriendo en local, `DELIVERY_API_URL=http://localhost:3002`.
 
 **4. Descargar los modelos locales** (VAD y detección de turno, solo la primera vez)
 
@@ -117,9 +136,18 @@ uv run agent.py dev
 
 Con `dev`, conéctate desde cualquier cliente de LiveKit — por ejemplo el
 [Agents Playground](https://agents-playground.livekit.io) — usando el mismo proyecto.
-Como el agente usa despacho explícito (`agent_name="agente-pollo"`), indica
+Como el agente usa despacho explícito (`AGENT_NAME = "agente-brasa"`), indica
 ese nombre como agent name al conectarte desde el Playground, o el agente no
 entrará a la sala (ver `docs/ARQUITECTURA.md` § Telefonía).
+
+**Antes de cualquier commit**, vale la pena correr:
+
+```bash
+uv run python scripts/verify_contrato.py
+```
+
+Comprueba las cosas que no dan error pero rompen la demo — sobre todo que el `AGENT_NAME`
+de `agent.py` y el de `web/main.py` sigan siendo el mismo. No necesita red ni credenciales.
 
 ## Interfaz web (sin teléfono)
 
@@ -164,12 +192,10 @@ pedidos (sin voz, solo el LLM).
 - El pedido en curso vive en `session.userdata` (`PedidoEnCurso`, en `tools/orders.py`),
   no en un global de módulo: cada llamada tiene su propio estado, así que dos llamadas
   simultáneas en el mismo proceso nunca se mezclan.
-- Las credenciales del `docker-compose.yml` (`admin` / `password`) son solo para
-  desarrollo local.
-- Si cambiaste de rama y la base ya tenía datos de antes, recarga el esquema (las tablas
-  `orders`/`order_items` tienen columnas nuevas: `total`, `customer_phone`, `unit_price`):
-  ```bash
-  docker compose exec -T postgres psql -U admin -d chicken_store \
-    -c "DROP TABLE IF EXISTS order_items, orders, products CASCADE;"
-  docker compose exec -T postgres psql -U admin -d chicken_store < database/schema.sql
-  ```
+- El WhatsApp de confirmación que recibe el cliente después de la llamada **solo llega si
+  ese número ya le había escrito al bot** (la ventana de 24 h de Meta). Si no, el pedido
+  queda igual de completo en el portal. No es una falla: es cómo funciona WhatsApp, y
+  conviene decirlo antes de mostrar la demo.
+- `AGENT_NAME` vive en dos archivos (`agent.py` y `web/main.py`) y tienen que ser el mismo
+  valor. Si no coinciden, la sala queda vacía **sin ningún error**: el navegador se queda
+  en "Conectando…" hasta que vence el plazo de 12 s. Es la trampa número uno de este repo.

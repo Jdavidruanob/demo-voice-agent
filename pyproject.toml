@@ -6,5 +6,7 @@ dependencies = [
     "livekit-agents[deepgram,fishaudio,openai,silero,turn-detector]~=1.5",
     "livekit-plugins-noise-cancellation~=0.2",
     "python-dotenv>=1.2.2",
-    "asyncpg>=0.31.0",
+    # El agente habla con el sistema de pedidos por HTTP; ya no tiene base de
+    # datos propia (ver brasa/api.py).
+    "httpx>=0.28",
 ]

@@ -2,3 +2,5 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 livekit-api~=1.2
 python-dotenv>=1.2.2
+# Para consultar /api/health del sistema de pedidos (GET /api/estado).
+httpx>=0.28

@@ -1,24 +1,43 @@
 # Arquitectura y estado actual
 
 Este documento describe **cómo funciona el sistema tal como está en esta rama
-(`pedidos`)**, para que cualquiera que retome el proyecto — humano o
+(`brasa-y-pan`)**, para que cualquiera que retome el proyecto — humano o
 agente — entienda el estado real sin tener que releer todo el código.
 
-El repo tiene tres ramas y cada una es una cosa distinta:
+El repo tiene varias ramas y cada una es una cosa distinta:
 
 | Rama | Qué es |
 |---|---|
 | `main` | La versión original, sin las optimizaciones de fluidez ni las correcciones de bugs descritas aquí. |
-| `pedidos` | Esta rama: la demo de toma de pedidos de un restaurante de pollo. |
+| `pedidos` | La demo de toma de pedidos de un restaurante de pollo, **con base de datos propia**. |
 | `reservas` | La demo de reservas de hotel, con la misma arquitectura y la misma interfaz web (en azul). |
+| `brasa-y-pan` | Esta rama: la misma demo de pedidos, **conectada al sistema de pedidos real de Brasa & Pan**. |
 
 ## Qué es esto
 
-Un agente de voz en español que atiende pedidos de una cadena de restaurantes
-de pollo, construido sobre [LiveKit Agents](https://docs.livekit.io/agents/).
-El objetivo del proyecto en su fase actual es **una demo comercial**: lo que
-se evalúa es que la conversación se sienta fluida y natural, no la cantidad de
-funciones ni la sofisticación del backend.
+Un agente de voz en español que atiende pedidos de **Brasa & Pan**, una
+hamburguesería y asadero, construido sobre
+[LiveKit Agents](https://docs.livekit.io/agents/).
+
+**Lo que cambia en esta rama frente a `pedidos`:** el agente ya no tiene base
+de datos. El catálogo y los pedidos viven en `demo-delivery-system`, el sistema
+que atiende a ese mismo restaurante por WhatsApp, y un pedido cerrado hablando
+aparece en el portal del restaurante con su comanda, su cronómetro, su
+repartidor y su aviso al cliente — exactamente igual que uno que entró por el
+menú web.
+
+### Por qué el agente no tiene base de datos propia
+
+Se evaluó copiar el catálogo de Brasa & Pan a una Postgres del agente, y se
+descartó por un caso concreto: marcar un producto como **agotado** en el portal
+del restaurante no llegaría nunca a la llamada, y el agente seguiría vendiendo
+por teléfono lo que la cocina ya no tiene.
+
+Y hay una segunda razón, más de fondo: **los precios y las promociones se
+resuelven en un solo sitio.** El agente manda referencias (SKU, ids de opción,
+cantidad) y el sistema de pedidos calcula el total contra su base. Si esa lógica
+viviera duplicada acá, la segunda copia se quedaría atrás en silencio — y el
+síntoma sería un cliente que oye un precio por teléfono y paga otro.
 
 ## Flujo de una llamada
 
@@ -44,10 +63,15 @@ agent.py: Assistant
     │
     ▼
 session.userdata: PedidoEnCurso   (estado de ESTA llamada, no global)
+    catalogo · api · call_id (= el room_name de LiveKit)
     │
     ▼
-Postgres (database/connection.py — pool singleton)
-    products / orders / order_items
+brasa/api.py  —— HTTP ——►  demo-delivery-system (apps/menu)
+    GET  /api/internal/catalog      (una vez, al arrancar la sesión)
+    POST /api/internal/voice-order  (al cerrar el pedido)
+    │
+    ▼
+Portal del restaurante: la comanda aparece en "Nuevos" con su badge 📞
 ```
 
 ### Por qué el menú ya no es una tool
@@ -55,9 +79,16 @@ Postgres (database/connection.py — pool singleton)
 Antes existía una tool `get_menu` que el LLM tenía que invocar y esperar
 (roundtrip completo) para responder algo tan simple como "¿qué bebidas
 tienen?". Como el menú (4 productos) no cambia durante una llamada, ahora se
-consulta **una sola vez** al arrancar la sesión (`build_menu_prompt_block()`
-en `tools/products.py`) y se inyecta directo en las `instructions` del
+consulta **una sola vez** al arrancar la sesión (`Catalogo.prompt_block()` en
+`brasa/catalogo.py`) y se inyecta directo en las `instructions` del
 `Assistant`. El agente "ya sabe" el menú desde el primer turno.
+
+El bloque que se inyecta lleva, por producto: el **código (SKU)** entre
+corchetes —que es lo que las tools reciben—, el **precio de hoy** ya resuelto
+por el servidor, y los grupos de personalización con sus ids. Los obligatorios
+van marcados `PREGUNTA SIEMPRE` y los opcionales `solo si lo pide`: leer en voz
+alta los extras de 25 productos sería insoportable, pero el agente necesita sus
+ids por si el cliente los menciona.
 
 `search_products` se conserva porque cumple un rol distinto: confirmar el
 `id` exacto de un producto cuando el cliente lo describe de forma ambigua o
@@ -201,30 +232,57 @@ explícitamente: ese mensaje sí llega intacto al LLM. Los errores esperables
 son un `{"success": False, "message": "..."}` normal, que el LLM ve como
 cualquier otro resultado de tool.
 
-## Modelo de datos
+## El sistema de pedidos: dos endpoints y un secreto
 
-```sql
-products (id, name, description, price, stock, category, keywords[])
-orders   (id, status, customer_phone, customer_name, delivery_address, total, created_at)
-order_items (id, order_id, product_id, quantity, unit_price)
-```
+No hay modelo de datos en este repo. Lo que hay es un contrato, en
+`brasa/api.py`, contra la app del menú de `demo-delivery-system`. Los dos
+endpoints van protegidos con `INTERNAL_SECRET`, que tiene que ser **exactamente
+el mismo valor** que tienen las apps del sistema de pedidos.
 
-- `unit_price` en `order_items` congela el precio al momento del pedido: un
-  cambio de precio futuro no altera pedidos ya confirmados.
-- `total` en `orders` se calcula en Python a partir de `PedidoEnCurso.total`
-  (suma de `unit_price * quantity`) y se guarda ya resuelto — el LLM nunca
-  tiene que sumar pesos colombianos de cabeza.
-- `customer_phone` queda `NULL` en console/playground. Se llena solo si la
-  llamada entra por SIP (ver siguiente sección).
-- `customer_name` y `delivery_address` son `NOT NULL`: `confirm_order` los
-  exige como parámetros obligatorios, así que un pedido confirmado siempre
-  los tiene. El agente debe preguntarlos explícitamente antes de confirmar
-  (ver el prompt en `agent.py`); no se asumen ni se infieren.
-- El tiempo de entrega que se le informa al cliente (`ETA_MINUTOS = 30` en
-  `tools/orders.py`) es un valor fijo de la demo, no un cálculo real de
-  logística/reparto.
-- Búsqueda difusa vía extensión `pg_trgm` + índices GIN trigram sobre `name`
-  y `description`, más coincidencia por substring sobre `keywords`.
+| Llamada | Cuándo | Si falla |
+|---|---|---|
+| `GET /api/internal/catalog` | Una vez, al arrancar la sesión | La llamada **no arranca**: el agente se disculpa, manda al WhatsApp y cuelga |
+| `POST /api/internal/voice-order` | Al confirmar el pedido | Dos reintentos; después, el respaldo de WhatsApp (§ Cuando algo falla) |
+| `GET /api/health` | Lo consulta la página, antes de dejar llamar | El botón queda deshabilitado con el WhatsApp a la vista |
+
+Tres cosas que no son obvias y que sostienen todo esto:
+
+- **El agente nunca manda un precio.** `PedidoEnCurso.para_el_sistema()` envía
+  solo `{sku, optionIds, quantity}`. El total lo calcula el servidor. Un agente
+  que se equivoque puede pedir el producto errado; no puede inventar lo que
+  cuesta.
+- **El total que se le dice al cliente es el de la respuesta**, no el que sumó
+  el agente. Si una promoción se vence en medio de la llamada, el número que se
+  dice en voz alta y el que quedó en la comanda son el mismo.
+- **`call_id` es el `room_name` de LiveKit**, y es lo que hace idempotente la
+  confirmación. El modelo invoca `confirm_order` dos veces de vez en cuando; el
+  sistema de pedidos tiene un índice único sobre ese campo y devuelve el mismo
+  pedido en vez de mandar la comanda repetida a la cocina. **No se regenera
+  nunca dentro de una llamada.**
+
+El subtotal parcial que el agente lleva en memoria (`PedidoEnCurso.total`) es
+solo para poder ir diciendo por dónde va la cuenta. Aplica la regla del 2x1
+—que no baja el precio unitario, baja cuántas unidades se cobran— para que
+coincida con el del servidor, pero el que manda siempre es el de
+`confirm_order`.
+
+## Cuando algo falla: tres respaldos, todos terminando en WhatsApp
+
+En una llamada no se puede "mostrar un error". Lo único útil es mandar al
+cliente a donde sí lo van a atender, y decirle la verdad sobre lo que pasó.
+
+| Cuándo | Qué pasa |
+|---|---|
+| **Antes de hablar** | La página consulta `GET /api/estado` al cargar. Si el sistema de pedidos no responde, el botón queda deshabilitado y se muestra el WhatsApp. Mejor no dejar entrar a una llamada de cuatro minutos que no puede terminar en un pedido. |
+| **Al arrancar la llamada** | Si el catálogo no se pudo traer, el agente **no saluda normal**: se disculpa, dice que el sistema no está disponible, manda al WhatsApp y cuelga (`_despedir_sin_servicio`). |
+| **Al confirmar** | Dos reintentos con backoff corto. Si sigue fallando, el agente dice la verdad —"se me cayó el sistema, no quiero dejarte el pedido a medias, escríbenos al…"— y el pedido completo queda logueado como `[pedido-no-guardado]` para poder recuperarlo. |
+| **Si LiveKit falla** | Un solo plazo de 12 s cubre pedir el token, conectar por WebRTC y que el agente entre a la sala. Al vencerse, la página muestra el mismo bloque de WhatsApp. |
+
+**`finalizar_llamada` tiene dos caminos para poder colgar**, no uno: pedido
+confirmado **o** respaldo ya dado. El candado original (no cerrar sin pedido)
+dejaba un hueco: con el sistema de pedidos caído, `order_code` nunca se llena y
+el agente se quedaba **sin poder despedirse**, repitiendo el error mientras el
+cliente esperaba.
 
 ## Telefonía: preparado, no conectado
 
@@ -237,15 +295,24 @@ número real de Colombia (troncal con Claro/Movistar/Tigo, o portabilidad a un
 proveedor SIP) es trabajo pendiente, discutido pero no iniciado — ver
 `docs/SPEC.md` § Fuera de alcance.
 
-El agente tiene nombre formal: `@server.rtc_session(agent_name="agente-pollo")`
-en `agent.py`. Es el nombre que un dispatch rule de SIP necesitaría para
+El agente tiene nombre formal: `@server.rtc_session(agent_name=AGENT_NAME)`
+en `agent.py`, con `AGENT_NAME = "agente-brasa"`. Es el nombre que un dispatch rule de SIP necesitaría para
 enrutar una llamada real específicamente a este agente (paso previo útil para
-cuando se conecte la telefonía). **Efecto secundario importante:** fijar
+cuando se conecte la telefonía). Cuando eso se haga, **nada del contrato con el
+sistema de pedidos cambia**: el teléfono llegaría solo y `confirm_order` no se
+toca. **Efecto secundario importante:** fijar
 `agent_name` activa "explicit dispatch" en `livekit-agents` — las salas ya no
 disparan el agente automáticamente. `console` no se ve afectado (simula el
 job localmente), pero para probar por `dev` + Playground hay que indicar
-`agente-pollo` como agent name al conectarse, o el agente simplemente no
+`agente-brasa` como agent name al conectarse, o el agente simplemente no
 entra a la sala.
+
+> **La trampa número uno de este repo.** `AGENT_NAME` está en **dos** archivos:
+> `agent.py` y `web/main.py`. Si se cambia en uno y no en el otro, LiveKit
+> conecta perfecto y no despacha a nadie: la sala queda vacía, no hay error en
+> ningún log, y el navegador se queda en "Conectando…". Lo comprueba
+> `scripts/verify_contrato.py`, y el plazo de 12 s de la página lo convierte en
+> un mensaje que el cliente puede leer.
 
 ## Interfaz web: hablar con el agente sin teléfono
 
@@ -259,8 +326,9 @@ Navegador (web/static/index.html)
     │  GET /api/token
     ▼
 web/main.py (FastAPI)
-    - genera un room_name nuevo por llamada (pedido-xxxxxx)
-    - firma un AccessToken con RoomAgentDispatch(agent_name="agente-pollo")
+    - GET /api/estado: ¿el sistema de pedidos está arriba?
+    - genera un room_name nuevo por llamada (brasa-xxxxxx = el call_id)
+    - firma un AccessToken con RoomAgentDispatch(agent_name="agente-brasa")
     ▼
 Navegador conecta por WebRTC directo a LiveKit Cloud con ese token
     │
@@ -269,24 +337,32 @@ LiveKit Cloud despacha el worker de agent.py a esa sala (mismo agente,
 mismo pipeline STT/LLM/TTS que por consola o teléfono)
 ```
 
-El punto clave es `with_room_config(RoomConfiguration(agents=[RoomAgentDispatch(agent_name="agente-pollo")]))`
-dentro del propio token: como `@server.rtc_session(agent_name="agente-pollo")`
+El punto clave es `with_room_config(RoomConfiguration(agents=[RoomAgentDispatch(agent_name=AGENT_NAME)]))`
+dentro del propio token: como `@server.rtc_session(agent_name=AGENT_NAME)`
 usa despacho explícito (ver § Telefonía más abajo), sin esto la sala quedaría
 vacía. No hace falta ninguna llamada aparte a la API de LiveKit para crear el
 dispatch — viaja en el token, así que `web/main.py` no necesita mantener una
 sesión HTTP hacia LiveKit ni guardar estado: cada request a `/api/token` es
 independiente.
 
-`web/` no toca `PedidoEnCurso` ni Postgres directamente; solo mintea
-credenciales de sala. El estado del pedido lo sigue manejando por completo
-`agent.py`, igual que en consola o por teléfono.
+`web/` no toca `PedidoEnCurso` ni el pedido; mintea credenciales de sala y
+consulta si el servicio está arriba. El estado del pedido lo sigue manejando
+por completo `agent.py`, igual que en consola o por teléfono.
+
+**`web/` no importa `brasa/` a propósito.** Se construye con `web/` como Root
+Directory en Railway, así que su contexto de build no ve el resto del repo. La
+comprobación de salud de `GET /api/estado` repite seis líneas de un GET en vez
+de acoplar los dos contextos de build para no repetirlas: el servicio web es
+deliberadamente autónomo.
 
 ## Variables de entorno
 
 | Variable | Default | Notas |
 |---|---|---|
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | — | Credenciales de LiveKit Cloud |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | `localhost` / `5433` / `admin` / `password` / `chicken_store` | `5433` para no chocar con otra Postgres local en `5432` |
+| `DELIVERY_API_URL` | — | La app del **menú** de Brasa & Pan (la que sirve `/api/internal/*`). Sin esto la llamada no arranca |
+| `INTERNAL_SECRET` | — | **El mismo** valor que tienen las apps del sistema de pedidos, o el catálogo responde 401 |
+| `BUSINESS_WHATSAPP_NUMBER` | — | El número real, sin `+` ni espacios. Es a dónde se manda al cliente en los tres respaldos |
 | `LLM_MODEL` | `openai/gpt-4.1-mini` | Ver `scripts/bench_llm.py` para comparar candidatos |
 | `STT_MODEL` | `deepgram/flux-general-multi` | Cambiar a `deepgram/nova-2` vuelve al camino de respaldo |
 | `AVISO_LEGAL` | `false` | Agrega al saludo el aviso de asistente virtual/grabación (Ley 1581 de 2012). Pensado para telefonía real, apagado en demo |

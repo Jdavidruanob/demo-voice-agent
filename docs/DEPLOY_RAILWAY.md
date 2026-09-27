@@ -11,26 +11,32 @@ alternativa donde ayuda).
 ┌─────────────────────────┐        ┌──────────────────────────┐
 │  Railway                │        │  LiveKit Cloud            │
 │                          │        │  (ya lo tienes, no cambia)│
-│  ┌────────────────────┐ │        │                            │
-│  │ Postgres (plugin)   │ │        │  Room + SFU + Inference    │
-│  └─────────▲──────────┘ │        │  (STT/LLM/TTS)             │
-│            │            │        └───────────▲────────────────┘
-│  ┌─────────┴──────────┐ │                    │ WebSocket saliente
-│  │ agent-worker        │ │ ───────────────────┘
-│  │ (Dockerfile raíz)   │ │
-│  │ agent.py start      │ │
-│  └─────────────────────┘ │
-│                          │
-│  ┌─────────────────────┐ │        Navegador del cliente
+│  ┌─────────────────────┐ │        │  Room + SFU + Inference    │
+│  │ agent-worker        │ │ ───────┤  (STT/LLM/TTS)             │
+│  │ (Dockerfile raíz)   │ │  WS    └───────────▲────────────────┘
+│  │ agent.py start      │ │  saliente          │
+│  └──────────┬──────────┘ │                    │
+│             │            │                    │
+│  ┌──────────┴──────────┐ │        Navegador del cliente
 │  │ web                 │◄├────────  (WebRTC directo a LiveKit,
 │  │ (web/Dockerfile)    │ │           no pasa por Railway)
 │  │ FastAPI + index.html│ │
 │  └─────────────────────┘ │
-└──────────────────────────┘
+└─────────────┬────────────┘
+              │ HTTPS (INTERNAL_SECRET)
+              ▼
+   Vercel: demo-delivery-system (apps/menu)
+   GET /api/internal/catalog · POST /api/internal/voice-order · GET /api/health
 ```
 
-Tres piezas nuevas en Railway (Postgres, `agent-worker`, `web`); LiveKit Cloud
-sigue siendo el mismo proyecto que ya usas en local — no hay que crear otro.
+**Dos** piezas en Railway (`agent-worker` y `web`) — ya **no hace falta
+Postgres**: esta rama no tiene base de datos propia. El catálogo y los pedidos
+viven en el sistema de pedidos de Brasa & Pan, que ya está desplegado en
+Vercel. LiveKit Cloud sigue siendo el mismo proyecto que usas en local.
+
+> Si vienes de la rama `pedidos` y ya tenías un servicio de Postgres en este
+> proyecto de Railway, bórralo **después** de comprobar que las llamadas
+> funcionan: ya no se usa, y sigue costando.
 
 **Por qué no se autohospeda LiveKit (el servidor de media) en Railway:**
 WebRTC necesita rango de puertos UDP para el audio; Railway solo expone
@@ -71,29 +77,30 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 - Las credenciales de tu proyecto de LiveKit Cloud, que ya tienes en tu
   `.env` local (`LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`).
 
-## 1. Crear el proyecto y Postgres
+## 1. Tener a mano lo del sistema de pedidos
 
-1. En Railway: **New Project** → **Deploy PostgreSQL** (el template oficial,
-   no lo conectes a un repo, es solo la base de datos).
-2. Cuando termine de aprovisionar, entra al servicio de Postgres → pestaña
-   **Variables** y anota los nombres exactos que expone (normalmente
-   `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`) — los vas a
-   referenciar desde el servicio del agente en el paso 3.
-3. Carga el esquema. La forma más simple: pestaña **Connect** del servicio
-   de Postgres → copia la URL de conexión pública (`postgresql://...`) y
-   corre desde tu máquina:
+No hay que crear ninguna base de datos. Lo que sí hace falta, del proyecto
+`demo-delivery-system` (el que ya está en Vercel):
+
+1. **La URL de la app del menú** — la que sirve `/api/internal/catalog`. Es la
+   que va en `DELIVERY_API_URL`. Compruébala antes de seguir:
    ```bash
-   psql "postgresql://usuario:password@host:puerto/railway" -f database/schema.sql
+   curl https://<esa-url>/api/health
+   # {"ok":true,"open":true,"products":25}
    ```
-   (Si tu Railway tiene una pestaña **Data**/consulta integrada, también
-   puedes pegar el contenido de `database/schema.sql` ahí directamente.)
+2. **El valor de `INTERNAL_SECRET`** de ese proyecto (Vercel → Settings →
+   Environment Variables). Tiene que ir **idéntico** en Railway: si no
+   coincide, el catálogo responde 401 y ninguna llamada arranca.
+3. **El número de WhatsApp real del restaurante**, sin `+` ni espacios. Es a
+   dónde se manda al cliente cuando algo falla; sin él, el respaldo dice
+   "escríbenos por WhatsApp" sin poder dar a dónde.
 
 ## 2. Desplegar el worker del agente
 
 1. En el mismo proyecto: **New** → **GitHub Repo** → selecciona
-   `demo-voice-agent` → rama **`pedidos`** (ahí está la demo de toma de
-   pedidos, ya con todo fusionado; `main` es el código original y `reservas`
-   es la otra demo, que va en su propio proyecto de Railway).
+   `demo-voice-agent` → rama **`brasa-y-pan`** (la demo conectada al sistema
+   de pedidos; `pedidos` es la versión con base de datos propia, `main` es el
+   código original y `reservas` es la otra demo, en su propio proyecto).
 2. Railway detecta el `Dockerfile` de la raíz automáticamente (Root
    Directory = `/`, el default). No hace falta tocar el build.
 3. Ve a **Variables** de este servicio y agrega:
@@ -101,22 +108,17 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
    LIVEKIT_URL=wss://tu-proyecto.livekit.cloud
    LIVEKIT_API_KEY=...
    LIVEKIT_API_SECRET=...
-   DB_HOST=${{Postgres.PGHOST}}
-   DB_PORT=${{Postgres.PGPORT}}
-   DB_USER=${{Postgres.PGUSER}}
-   DB_PASSWORD=${{Postgres.PGPASSWORD}}
-   DB_NAME=${{Postgres.PGDATABASE}}
+   DELIVERY_API_URL=https://<la-app-del-menu>.vercel.app
+   INTERNAL_SECRET=<el mismo valor del sistema de pedidos>
+   BUSINESS_WHATSAPP_NUMBER=57...
    LLM_MODEL=openai/gpt-4.1-mini
    STT_MODEL=deepgram/flux-general-multi
    AVISO_LEGAL=false
    ```
-   `${{Postgres.PGHOST}}` es la sintaxis de Railway para referenciar la
-   variable de **otro** servicio del mismo proyecto — usa el nombre que le
-   puso Railway a tu servicio de Postgres (por defecto suele llamarse
-   `Postgres`) y los nombres de variable que anotaste en el paso 1.2.
+   `DELIVERY_API_URL` **sin barra al final** y sin el `/api` — el cliente
+   arma las rutas por su cuenta.
 4. Nómbralo algo claro, ej. `agent-worker`, y despliega. En los logs deberías
-   ver que arranca y queda esperando jobs (sin errores de conexión a
-   Postgres ni a LiveKit).
+   ver que arranca y queda esperando jobs, sin errores de conexión a LiveKit.
 5. **No** generes un dominio público para este servicio: no recibe tráfico
    HTTP entrante, solo se conecta hacia afuera.
 
@@ -125,12 +127,19 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 1. En el mismo proyecto: **New** → **GitHub Repo** → mismo repo, misma rama
    `pedidos`, pero esta vez en **Settings** de ese servicio pon
    **Root Directory = `web`**. Railway usará `web/Dockerfile`.
-2. Variables de este servicio (son las únicas tres que necesita):
+2. Variables de este servicio:
    ```
    LIVEKIT_URL=wss://tu-proyecto.livekit.cloud
    LIVEKIT_API_KEY=...
    LIVEKIT_API_SECRET=...
+   DELIVERY_API_URL=https://<la-app-del-menu>.vercel.app
+   BUSINESS_WHATSAPP_NUMBER=57...
    ```
+   Las dos últimas son para `GET /api/estado`: la página pregunta si el
+   sistema de pedidos está arriba **antes** de dejar llamar, y si no lo está
+   muestra el WhatsApp en vez de dejar entrar a una llamada que no puede
+   terminar en pedido. Este servicio **no** necesita `INTERNAL_SECRET`: solo
+   consulta `/api/health`, que es público.
 3. Nómbralo `web`, despliega, y en **Settings → Networking** genera un
    dominio público (`Generate Domain`). Railway te da una URL tipo
    `web-production-xxxx.up.railway.app` con HTTPS ya incluido — necesario
@@ -140,11 +149,15 @@ Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 
 1. Abre la URL pública del servicio `web`.
 2. Toca el botón de llamar, acepta el permiso de micrófono.
-3. Corre el guion de prueba de `docs/SPEC.md` § Criterios de aceptación
-   (escenario 11): pedir productos, corregir algo, confirmar con nombre y
-   dirección, despedirte — la llamada debe cerrarse sola.
-4. Si no conecta: revisa los logs de `agent-worker` (¿arrancó? ¿se conectó a
-   Postgres?) y de `web` (¿el `/api/token` devuelve 200?), en ese orden.
+3. Corre el guion de prueba de `docs/SPEC.md` § Criterios de aceptación:
+   pedir productos, corregir algo, confirmar con nombre, dirección, celular y
+   forma de pago, despedirte — la llamada debe cerrarse sola.
+4. **Abre el portal de Brasa & Pan**: la comanda tiene que estar en "Nuevos"
+   con su badge 📞, con las opciones en el renglón y el total correcto. Eso es
+   lo que hay que poder mostrar; que la llamada suene bien no basta.
+5. Si no conecta: revisa los logs de `agent-worker` (¿arrancó? ¿el catálogo
+   cargó, o hay un `[arranque] sin sistema de pedidos`?) y de `web` (¿el
+   `/api/token` devuelve 200? ¿`/api/estado` dice `ok:true`?), en ese orden.
 
 ## Si pide micrófono pero no se escucha nada (diagnóstico)
 
@@ -161,9 +174,12 @@ descarta una causa distinta:
 **2. Revisa los logs de `agent-worker` buscando la línea `received job
    request`** justo después de dar clic en llamar.
    - Si **aparece** y luego hay un traceback: el agente sí fue despachado
-     pero crashea al arrancar (ejemplo real ya resuelto: `DB_PORT` apuntando
-     al host en vez de al puerto). Lee el traceback, es el caso más fácil de
+     pero crashea al arrancar. Lee el traceback, es el caso más fácil de
      depurar.
+   - Si aparece `[arranque] sin sistema de pedidos`: el agente entró, no pudo
+     traer el catálogo, se disculpó y colgó. Es el respaldo funcionando.
+     Revisa `DELIVERY_API_URL` e `INTERNAL_SECRET` (un 401 ahí es el error
+     más común: el secreto no coincide con el de Vercel).
    - Si **no aparece nada** (solo `initializing process` / `process
      initialized` en bucle, sin `received job request`): el problema es que
      LiveKit nunca despachó el agente a la sala. Sigue al punto 3.

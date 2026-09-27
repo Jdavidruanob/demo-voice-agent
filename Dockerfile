@@ -14,7 +14,7 @@ RUN uv sync --frozen --no-dev
 
 COPY agent.py ./
 COPY tools ./tools
-COPY database ./database
+COPY brasa ./brasa
 COPY assets ./assets
 
 # Precarga en el build (no en el primer job real) los modelos que el agente

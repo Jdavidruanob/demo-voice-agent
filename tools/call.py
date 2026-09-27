@@ -36,7 +36,17 @@ async def finalizar_llamada(ctx: RunContext[PedidoEnCurso], despedida: str):
 
     pedido = ctx.userdata
 
-    if pedido.order_id is None:
+    # Dos caminos para poder colgar, no uno.
+    #
+    # El candado original —no cerrar sin pedido confirmado— es correcto en el
+    # camino feliz: evita que el modelo encadene un "gracias, hasta luego"
+    # antes de haber guardado nada. Pero deja un hueco: si el sistema de
+    # pedidos se cae, `confirm_order` nunca llena `order_code`, y el agente se
+    # queda SIN PODER DESPEDIRSE, repitiendo el error mientras el cliente
+    # espera. Por eso `respaldo_dado` tambien abre la puerta: significa que ya
+    # se le dijo al cliente la verdad (que escriba por WhatsApp), y en ese punto
+    # colgar es lo correcto.
+    if pedido.order_code is None and not pedido.respaldo_dado:
         return {
             "success": False,
             "message": (
@@ -67,7 +77,12 @@ async def finalizar_llamada(ctx: RunContext[PedidoEnCurso], despedida: str):
         logger.warning("[llamada] sin JobContext: no hay sala que cerrar")
         return None
 
-    logger.info("[llamada] cerrando la sala tras confirmar pedido #%s", pedido.order_id)
+    if pedido.order_code:
+        logger.info("[llamada] cerrando la sala tras confirmar el pedido %s", pedido.order_code)
+    else:
+        logger.warning(
+            "[llamada] cerrando la sala SIN pedido guardado (se dio el respaldo de WhatsApp)"
+        )
 
     # Cerrar la sala, no matar el proceso. delete_room desconecta a todos los
     # participantes, asi que el navegador recibe el evento Disconnected al

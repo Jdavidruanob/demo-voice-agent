@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -16,7 +17,9 @@ from livekit.agents import (
 from livekit.agents.voice.events import ConversationItemAddedEvent
 from livekit.plugins import noise_cancellation, silero
 
-from tools.products import search_products, build_menu_prompt_block
+from brasa.api import PedidosAPI, PedidosCaido
+from brasa.catalogo import Catalogo
+from tools.products import search_products
 from tools.orders import (
     PedidoEnCurso,
     add_item_to_order,
@@ -42,6 +45,17 @@ STT_MODEL = os.getenv("STT_MODEL", "deepgram/flux-general-multi")
 # telefonia real. Apagado en la demo para no alargar el saludo; se activa
 # con AVISO_LEGAL=true el dia que esto atienda llamadas de verdad.
 AVISO_LEGAL = os.getenv("AVISO_LEGAL", "false").lower() == "true"
+
+# TIENE que coincidir con el AGENT_NAME de web/main.py. El despacho es
+# explicito: si los dos nombres no son iguales, LiveKit no manda a nadie a la
+# sala y el navegador se queda "conectando..." SIN NINGUN ERROR. Es la trampa
+# numero uno de este repo; el timeout de 8 s de la pagina existe por esto.
+AGENT_NAME = "agente-brasa"
+
+# El numero al que se manda al cliente cuando la llamada no puede terminar en
+# pedido. Se lee del entorno y, si no esta, del catalogo que devuelve el
+# sistema de pedidos.
+WHATSAPP_RESPALDO = os.getenv("BUSINESS_WHATSAPP_NUMBER", "")
 
 # Apellidos colombianos frecuentes pero poco comunes en el ingles/generico
 # con el que suelen entrenarse los modelos de STT (a los clientes les ha
@@ -69,10 +83,10 @@ APELLIDOS_A_RECONOCER = [
 AMBIENCE_AUDIO_PATH = "assets/restaurant_ambience.wav"
 AMBIENCE_VOLUME = 0.04
 
-SALUDO = "¡Hola! Bienvenido, soy el asistente de pedidos. ¿Qué le gustaría ordenar hoy?"
+SALUDO = "¡Hola! Bienvenido a Brasa & Pan, soy la asistente de pedidos. ¿Qué le gustaría pedir hoy?"
 if AVISO_LEGAL:
     SALUDO = (
-        "¡Hola! Bienvenido. Le informo que esta llamada es atendida por un "
+        "¡Hola! Bienvenido a Brasa & Pan. Le informo que esta llamada es atendida por un "
         "asistente virtual y puede ser grabada para mejorar el servicio. "
         "¿Qué le gustaría ordenar hoy?"
     )
@@ -118,11 +132,24 @@ class Assistant(Agent):
     def __init__(self, menu_text: str) -> None:
         super().__init__(
             instructions=f"""
-            Eres una tomadora de pedidos de una cadena de restaurantes de pollo.
+            Eres la tomadora de pedidos de Brasa & Pan, una hamburguesería y asadero.
             Tu función principal es atender a los clientes por teléfono y ayudarlos a realizar sus pedidos.
 
             MENU (esto es todo lo que existe; no ofrezcas ni inventes nada fuera de esta lista):
             {menu_text}
+
+            CÓMO LEER EL MENÚ DE ARRIBA:
+            - Entre corchetes va el código del producto (ej. [BURG-DOBLE]). Es lo que le
+              pasas a las herramientas en el parámetro "sku". Nunca le digas el código al
+              cliente en voz alta: él no sabe qué es eso.
+            - Debajo de un producto puede haber grupos de opciones con sus ids
+              (ej. "Término de la carne [PREGUNTA SIEMPRE]: Tres cuartos=9").
+              Los que dicen PREGUNTA SIEMPRE son obligatorios: sin ellos la cocina no
+              puede preparar el plato, así que pregúntalos antes de agregar el producto.
+              Los que dicen "solo si lo pide" son extras: NO los enumeres en voz alta, y
+              úsalos solo si el cliente los menciona por su cuenta.
+            - Si un producto dice AGOTADO HOY, no lo ofrezcas. Si el cliente lo pide,
+              dile que hoy no lo tienes (no que no existe) y ofrécele algo parecido.
 
             OBJETIVO:
             - Escuchar atentamente al cliente.
@@ -200,6 +227,15 @@ class Assistant(Agent):
               turno, cuando el corte de turno se sintió prematuro, sea mínima en vez de
               tomarse la palabra por completo.
 
+            PRECIOS — REGLA QUE NO SE ROMPE:
+            - Los precios del menú de arriba son los de hoy, con las promociones ya
+              aplicadas. Puedes decirlos.
+            - NUNCA digas un total que no venga de una herramienta. El total definitivo,
+              con domicilio incluido, lo devuelve confirm_order: ese es el número que le
+              dices al cliente, no uno que hayas sumado tú.
+            - Si el cliente pregunta por promociones, responde con las que están en el
+              menú y su horario. No inventes condiciones ni las extiendas.
+
             PEDIDOS:
             - El menú de arriba ya lo conoces: para preguntas generales o por categoría
               ("qué bebidas tienen", "qué combos manejan") respóndelas directo, sin usar
@@ -209,26 +245,37 @@ class Assistant(Agent):
               cantidades para confirmar que sean correctos, con la misma naturalidad de
               arriba (nombre completo del producto, cantidad en palabras).
             - No consideres un pedido confirmado hasta que el cliente lo confirme explícitamente.
-            - Antes de usar confirm_order, SIEMPRE pregunta estos dos datos si aún no los
-              tienes (uno a la vez, no los dos juntos): a nombre de quién queda el pedido
-              (ej. "¿A nombre de quién le dejo el pedido?") y la dirección de entrega
-              (ej. "¿Me regala la dirección de entrega, por favor?"). No los des por
-              sentado ni los inventes, aunque el cliente ya haya mencionado algo parecido
-              antes: confírmalo explícitamente.
-            - Ya con los dos datos, antes de llamar a confirm_order repítelos JUNTOS en
-              una sola frase y pide confirmación explícita (ej. "Entonces el pedido queda
-              a nombre de Laura Gómez, con entrega en la Carrera 10 #20-30, ¿así está
-              bien?"). No llames a confirm_order hasta que el cliente confirme que ambos
-              datos están correctos.
+            - Antes de usar confirm_order, SIEMPRE pregunta estos CUATRO datos si aún no
+              los tienes, UNO A LA VEZ, nunca dos juntos en la misma frase:
+                1. A nombre de quién queda el pedido ("¿A nombre de quién le dejo el pedido?").
+                2. La dirección de entrega ("¿Me regala la dirección de entrega, por favor?").
+                3. El celular al que se le confirma ("¿A qué número le confirmamos por
+                   WhatsApp?"). Si el cliente no lo quiere dar, no insistas: manda una
+                   cadena vacía en el parámetro phone y sigue.
+                4. Cómo va a pagar ("¿Va a pagar en efectivo, por transferencia o con
+                   tarjeta?"). "Con tarjeta" es "datafono": el domiciliario lleva el
+                   datáfono.
+              No des ninguno por sentado ni lo inventes, aunque el cliente haya mencionado
+              algo parecido antes: confírmalo explícitamente.
+            - Ya con los datos, antes de llamar a confirm_order repite el NOMBRE y la
+              DIRECCIÓN juntos en una sola frase y pide confirmación explícita (ej.
+              "Entonces el pedido queda a nombre de Laura Gómez, con entrega en la Carrera
+              10 #20-30, ¿así está bien?"). No llames a confirm_order hasta que el cliente
+              confirme que están correctos. La dirección es lo único que nadie puede
+              adivinar después: si se escuchó mal, el pedido no llega.
             - Si el cliente corrige el nombre o la dirección en ese momento (por ejemplo
               porque el nombre se escuchó mal), usa el dato corregido y repite la
-              confirmación de los dos datos otra vez antes de continuar. No asumas que el
-              resto del pedido cambió solo porque corrigió el nombre o la dirección.
-            - Cuando tengas productos, nombre y dirección ya confirmados por el cliente,
-              usa confirm_order pasándole customer_name y delivery_address.
-            - Al confirmar, dile al cliente que su pedido llega en aproximadamente
-              30 minutos (la tool ya te lo recuerda en su respuesta; repítelo con tus
-              palabras).
+              confirmación otra vez antes de continuar. No asumas que el resto del pedido
+              cambió solo porque corrigió el nombre o la dirección.
+            - Al confirmar, dile al cliente el total y el tiempo de entrega que devolvió
+              confirm_order, con tus palabras.
+            - Si confirm_order te dice que algo se agotó o que falta un dato, NO le digas
+              al cliente que el pedido quedó: arregla lo que falta con él y vuelve a
+              confirmar.
+            - Si confirm_order te dice que el sistema no responde, dile al cliente
+              exactamente lo que esa herramienta te indique: que se cayó el sistema y que
+              escriba por WhatsApp. NO le prometas que el pedido va a llegar: no quedó
+              guardado en ninguna parte. Después despídete con finalizar_llamada.
             - Después de usar confirm_order, NO cierres la llamada en ese mismo turno:
               cuéntale al cliente que el pedido quedó confirmado, que llega en unos 30
               minutos, y pregúntale si necesita algo más. Espera su respuesta.
@@ -321,20 +368,68 @@ def _capturar_telefono_sip(session: AgentSession[PedidoEnCurso], room: rtc.Room)
     room.on("participant_connected", _revisar)
 
 
+async def _despedir_sin_servicio(ctx: JobContext, motivo: str) -> None:
+    """Cuando el sistema de pedidos no responde al arrancar la llamada.
+
+    No se deja entrar a una conversacion de cuatro minutos que no puede
+    terminar en un pedido: se dice la verdad, se manda al WhatsApp real y se
+    cuelga. Es el nivel de respaldo mas temprano (la pagina web tiene otro,
+    antes de llamar, con GET /api/estado).
+
+    Se levanta una sesion minima —solo TTS, sin STT ni tools— porque lo unico
+    que hace falta es decir una frase y colgar.
+    """
+    logger.error("[arranque] sin sistema de pedidos: %s", motivo)
+
+    numero = WHATSAPP_RESPALDO
+    donde = f"al WhatsApp {numero}" if numero else "por WhatsApp"
+    mensaje = (
+        "¡Hola! Le pido disculpas: en este momento nuestro sistema de pedidos no está "
+        f"disponible, así que no puedo tomarle el pedido por teléfono. Escríbanos {donde} "
+        "y lo atendemos ahí mismo. ¡Gracias por su paciencia!"
+    )
+
+    session = AgentSession(
+        tts=inference.TTS(model="deepgram/aura-2", voice="celeste", language="es-CO"),
+    )
+    await session.start(agent=Agent(instructions="No hables."), room=ctx.room)
+    handle = session.say(mensaje)
+    await handle.wait_for_playout()
+    await asyncio.sleep(1.5)
+    await ctx.delete_room()
+
+
 # The entrypoint function runs when a participant joins the room
-@server.rtc_session(agent_name="agente-pollo")
+@server.rtc_session(agent_name=AGENT_NAME)
 async def entrypoint(ctx: JobContext):
-    # Una sola consulta a Postgres al arrancar la sesion, en vez de una
-    # tool (get_menu) que el agente tendria que invocar y esperar en medio
-    # de la conversacion. De paso, esta llamada crea el pool de conexiones
-    # (singleton en database/connection.py), asi que la primera tool real
-    # de la llamada ya no paga ese costo de arranque.
-    menu_text = await build_menu_prompt_block()
+    # El catalogo se trae del sistema de pedidos UNA sola vez al arrancar la
+    # sesion, no con una tool que el agente tendria que invocar en medio de la
+    # conversacion: asi el agente ya "sabe" la carta desde el primer turno.
+    #
+    # Es tambien la primera comprobacion de que el sistema esta arriba. Si no
+    # esta, no se arranca la llamada: se dice la verdad y se cuelga.
+    api = PedidosAPI()
+    try:
+        catalogo = Catalogo(await api.catalogo())
+    except PedidosCaido as e:
+        await api.aclose()
+        await _despedir_sin_servicio(ctx, str(e))
+        return
+
+    ctx.add_shutdown_callback(api.aclose)
+    menu_text = catalogo.prompt_block()
 
     stt_component, turn_detection, endpointing = _build_turn_pipeline()
 
     session = AgentSession[PedidoEnCurso](
-        userdata=PedidoEnCurso(),
+        userdata=PedidoEnCurso(
+            # El nombre de la sala es lo que hace idempotente la confirmacion:
+            # un `confirm_order` repetido con el mismo call_id devuelve el mismo
+            # pedido en vez de mandar la comanda dos veces a la cocina.
+            call_id=ctx.room.name,
+            catalogo=catalogo,
+            api=api,
+        ),
         stt=stt_component,
         llm=LLM_MODEL,
         # La voz no se toca: aura-2 / celeste / es-CO tal cual estaba.

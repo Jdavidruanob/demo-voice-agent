@@ -21,10 +21,10 @@ finish review, the verdict, and DESIGN.md.
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0a0a0c" />
-<title>Asistente de Pedidos — Demo</title>
-<meta name="description" content="Haz un pedido hablando con el asistente, directo desde el navegador y sin necesidad de teléfono." />
-<meta property="og:title" content="Asistente de Pedidos — Demo" />
-<meta property="og:description" content="Haz un pedido hablando con el asistente, directo desde el navegador y sin necesidad de teléfono." />
+<title>Brasa &amp; Pan — Pedidos por llamada</title>
+<meta name="description" content="Pide en Brasa &amp; Pan hablando con la asistente, directo desde el navegador y sin necesidad de teléfono." />
+<meta property="og:title" content="Brasa &amp; Pan — Pedidos por llamada" />
+<meta property="og:description" content="Pide en Brasa &amp; Pan hablando con la asistente, directo desde el navegador y sin necesidad de teléfono." />
 <meta property="og:type" content="website" />
 <style>
   :root {
@@ -166,6 +166,45 @@ finish review, the verdict, and DESIGN.md.
     line-height: 1.5;
   }
 
+  /* El bloque de respaldo: cuando la llamada no puede terminar en pedido, lo
+     unico que importa es que el cliente encuentre el WhatsApp. Por eso el
+     enlace es un boton de verdad y no una linea de texto mas. */
+  .respaldo {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    max-width: 300px;
+    text-align: center;
+  }
+
+  .respaldo.visible { display: flex; }
+
+  .respaldo p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink-tenue);
+  }
+
+  .respaldo strong { color: var(--ink); font-weight: 600; }
+
+  .respaldo a {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 0 20px;
+    border-radius: 999px;
+    background: #25d366;
+    color: #06281a;
+    font-size: 15px;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .boton-llamar:disabled { opacity: 0.35; cursor: not-allowed; }
+
   @media (prefers-reduced-motion: reduce) {
     .boton-llamar, .barra { transition: none; }
     .boton-llamar.conectando::before { animation: none; }
@@ -173,7 +212,7 @@ finish review, the verdict, and DESIGN.md.
 </style>
 </head>
 <body>
-  <div class="marca">Pedidos</div>
+  <div class="marca">Brasa &amp; Pan</div>
 
   <div class="instrumento">
     <button id="botonLlamar" class="boton-llamar" aria-label="Llamar" type="button">
@@ -193,6 +232,11 @@ finish review, the verdict, and DESIGN.md.
 
   <p id="ayuda" class="ayuda">Se te pedirá acceso al micrófono.</p>
 
+  <div id="respaldo" class="respaldo">
+    <p id="respaldoTexto"></p>
+    <a id="respaldoEnlace" href="#" target="_blank" rel="noopener">Escribir por WhatsApp</a>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
   <script>
     const boton = document.getElementById("botonLlamar");
@@ -204,8 +248,30 @@ finish review, the verdict, and DESIGN.md.
     const COLOR_TU = [242, 239, 233];   // --ink, cuando tú hablas
     const COLOR_AGENTE = [201, 138, 74]; // --acento, cuando el agente habla
 
+    const respaldoEl = document.getElementById("respaldo");
+    const respaldoTextoEl = document.getElementById("respaldoTexto");
+    const respaldoEnlaceEl = document.getElementById("respaldoEnlace");
+
+    // Plazo para TODO el arranque de la llamada: pedir el token, conectar por
+    // WebRTC y que el agente entre a la sala.
+    //
+    // Es un solo plazo y no uno por paso a propósito, porque los dos fallos que
+    // importan se ven igual desde acá —la pantalla congelada en "Conectando…"—
+    // y ninguno de los dos lanza un error que se pueda atrapar:
+    //
+    //  - Si LIVEKIT_URL apunta a un servidor que no existe, room.connect()
+    //    reintenta por su cuenta y tarda mucho en rendirse.
+    //  - Si el AGENT_NAME de web/main.py y el de agent.py no coinciden, LiveKit
+    //    conecta perfecto y no despacha a nadie: la sala queda vacía.
+    //
+    // 12 segundos ya son muchos mirando un círculo en silencio; más que eso, el
+    // cliente ya se fue.
+    const ESPERA_LLAMADA_MS = 12000;
+
     let room = null;
     let modo = "idle"; // idle | conectando | llamada
+    let whatsapp = "";
+    let temporizadorAgente = null;
     let audioCtx = null;
     let obtenerNivelLocal = null;
     let obtenerNivelRemoto = null;
@@ -303,11 +369,89 @@ finish review, the verdict, and DESIGN.md.
       return null;
     }
 
+    function mostrarRespaldo(texto) {
+      respaldoTextoEl.innerHTML = texto;
+      const numero = (whatsapp || "").replace(/\D/g, "");
+      if (numero) {
+        respaldoEnlaceEl.href = "https://wa.me/" + numero;
+        respaldoEnlaceEl.style.display = "";
+      } else {
+        respaldoEnlaceEl.style.display = "none";
+      }
+      respaldoEl.classList.add("visible");
+      ayudaEl.style.display = "none";
+    }
+
+    function ocultarRespaldo() {
+      respaldoEl.classList.remove("visible");
+    }
+
+    /**
+     * Antes de dejar llamar, se pregunta si el sistema de pedidos esta arriba.
+     *
+     * Es el respaldo mas temprano y el mas valioso: mejor no dejar entrar a una
+     * llamada de cuatro minutos que no puede terminar en un pedido, que dejar
+     * al cliente contarle todo a una asistente que no va a poder guardarlo.
+     */
+    async function comprobarServicio() {
+      try {
+        const resp = await fetch("/api/estado");
+        const datos = await resp.json();
+        whatsapp = datos.whatsapp || "";
+        if (datos.ok === true) return true;
+      } catch (err) {
+        console.error(err);
+      }
+
+      boton.disabled = true;
+      setEstado("Fuera de servicio", "error");
+      mostrarRespaldo(
+        "<strong>El pedido por llamada está fuera de servicio en este momento.</strong> " +
+          "Escríbenos por WhatsApp y te atendemos ahí mismo.",
+      );
+      return false;
+    }
+
+    function cancelarPlazo() {
+      if (temporizadorAgente) {
+        clearTimeout(temporizadorAgente);
+        temporizadorAgente = null;
+      }
+    }
+
+    function caerAlRespaldo(mensaje) {
+      modo = "idle";
+      cancelarPlazo();
+      if (room) {
+        try { room.disconnect(); } catch (_) {}
+        room = null;
+      }
+      if (audioCtx) {
+        try { audioCtx.close(); } catch (_) {}
+        audioCtx = null;
+      }
+      limpiarAudios();
+      boton.classList.remove("conectando", "en-llamada");
+      boton.disabled = false;
+      setEstado(mensaje, "error");
+      mostrarRespaldo(
+        "No pudimos conectarte con la asistente. <strong>Escríbenos por WhatsApp</strong> " +
+          "y te tomamos el pedido ahí mismo.",
+      );
+    }
+
     async function iniciarLlamada() {
+      ocultarRespaldo();
       boton.disabled = true;
       modo = "conectando";
       boton.classList.add("conectando");
       setEstado("Conectando…");
+
+      // El reloj arranca ACÁ, no después de conectar: si connect() se cuelga,
+      // un temporizador puesto más abajo nunca llegaría a existir.
+      temporizadorAgente = setTimeout(() => {
+        caerAlRespaldo("La asistente no contestó.");
+      }, ESPERA_LLAMADA_MS);
 
       try {
         const resp = await fetch("/api/token");
@@ -335,8 +479,17 @@ finish review, the verdict, and DESIGN.md.
           if (modo === "llamada") terminarLlamada();
         });
 
+        // El agente ENTRANDO a la sala es lo único que confirma que la llamada
+        // existe de verdad; conectarse no alcanza. Es lo que apaga el reloj.
+        room.on(LK.RoomEvent.ParticipantConnected, cancelarPlazo);
+
         await room.connect(serverUrl, participantToken);
         await room.localParticipant.setMicrophoneEnabled(true);
+
+        // Puede que ya estuviera adentro antes de suscribirnos al evento.
+        if (room.remoteParticipants && room.remoteParticipants.size > 0) {
+          cancelarPlazo();
+        }
 
         const pistaLocal = pistaLocalDeAudio(room);
         if (pistaLocal) obtenerNivelLocal = crearAnalizador(pistaLocal.mediaStreamTrack);
@@ -350,17 +503,19 @@ finish review, the verdict, and DESIGN.md.
         ayudaEl.style.display = "none";
         setEstado("En llamada — habla cuando quieras");
       } catch (err) {
+        // Token, WebRTC o micrófono: desde el lado del cliente son el mismo
+        // problema —no hay llamada— y la salida útil es la misma. Decir solo
+        // "intenta de nuevo" deja al cliente reintentando algo que no va a
+        // funcionar, en vez de mandarlo a donde sí lo atienden.
         console.error(err);
-        modo = "idle";
-        boton.classList.remove("conectando");
-        setEstado("No se pudo conectar. Intenta de nuevo.", "error");
-        boton.disabled = false;
+        caerAlRespaldo("No se pudo conectar.");
       }
     }
 
     async function terminarLlamada() {
       modo = "idle";
       boton.disabled = true;
+      cancelarPlazo();
       obtenerNivelLocal = null;
       obtenerNivelRemoto = null;
 
@@ -388,6 +543,8 @@ finish review, the verdict, and DESIGN.md.
         iniciarLlamada();
       }
     });
+
+    comprobarServicio();
   </script>
 </body>
 </html>
