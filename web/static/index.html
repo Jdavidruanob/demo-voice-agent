@@ -403,6 +403,16 @@ finish review, the verdict, and DESIGN.md.
         console.error(err);
       }
 
+      // Si el cliente ya dio clic mientras esto viajaba, su llamada manda.
+      //
+      // Visto en una prueba real: el chequeo tardó más que el clic, volvió
+      // "caído", y la página mostró "Fuera de servicio" y deshabilitó el botón
+      // **mientras la asistente ya estaba hablando**. Un veredicto viejo no
+      // puede tumbar una llamada en curso, y además una llamada conectada ya
+      // demuestra que el sistema está arriba: el agente no habría podido
+      // arrancar sin traer el catálogo.
+      if (modo !== "idle") return true;
+
       boton.disabled = true;
       setEstado("Fuera de servicio", "error");
       mostrarRespaldo(

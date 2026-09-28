@@ -1,0 +1,3 @@
+# El Dockerfile es para Railway, no para Vercel. Se excluye para que la
+# deteccion de framework no dude: acá el runtime es Python/ASGI.
+Dockerfile

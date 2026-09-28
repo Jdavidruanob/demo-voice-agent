@@ -1,9 +1,19 @@
-# Desplegar en Railway (la forma más barata)
+# Desplegar: el agente en Railway, la página en Vercel
 
-Guía paso a paso para poner en línea el agente + la interfaz web, sin
-depender de un número de teléfono. Pensada para seguirse una sola vez desde
-el dashboard de Railway; no requiere su CLI (aunque se menciona como
-alternativa donde ayuda).
+Guía paso a paso para poner en línea el agente + la interfaz web, sin depender
+de un número de teléfono.
+
+**Las dos piezas van en sitios distintos, y no es capricho:**
+
+- **El worker del agente NO puede ir a Vercel.** No es un tema de límites, es
+  de forma: una función de Vercel la dispara un request HTTP y muere cuando
+  responde. El agente se registra contra LiveKit por un WebSocket y **se queda
+  esperando** a que le despachen llamadas — no hay request que lo arranque ni
+  que lo sostenga. (Y aunque lo forzaras, en Hobby con Fluid Compute el techo
+  son 300 s y una llamada larga lo pasa.) Va en Railway.
+- **La página SÍ, y ahí sale gratis.** Es una página estática, un JWT y un
+  `GET`: encaja perfecto en el runtime de Python de Vercel, que detecta la app
+  de FastAPI sola. Va en Vercel.
 
 ## Qué se despliega y dónde
 
@@ -17,26 +27,33 @@ alternativa donde ayuda).
 │  │ agent.py start      │ │  saliente          │
 │  └──────────┬──────────┘ │                    │
 │             │            │                    │
-│  ┌──────────┴──────────┐ │        Navegador del cliente
-│  │ web                 │◄├────────  (WebRTC directo a LiveKit,
-│  │ (web/Dockerfile)    │ │           no pasa por Railway)
-│  │ FastAPI + index.html│ │
-│  └─────────────────────┘ │
 └─────────────┬────────────┘
               │ HTTPS (INTERNAL_SECRET)
               ▼
-   Vercel: demo-delivery-system (apps/menu)
-   GET /api/internal/catalog · POST /api/internal/voice-order · GET /api/health
+   ┌──────────────────────────────────────────────┐
+   │  Vercel (gratis)                              │
+   │                                               │
+   │  web  (web/, FastAPI + index.html)            │
+   │    GET /api/token   · firma el JWT de LiveKit │
+   │    GET /api/estado  · ¿el sistema está arriba?│
+   │                        ▲                      │
+   │  demo-delivery-system (apps/menu)             │
+   │    GET  /api/internal/catalog                 │
+   │    POST /api/internal/voice-order             │
+   │    GET  /api/health ──────────────────────────┘
+   └───────────────────────────────────────────────┘
+                    ▲
+                    │ WebRTC directo a LiveKit (no pasa por Railway ni Vercel)
+            Navegador del cliente
 ```
 
-**Dos** piezas en Railway (`agent-worker` y `web`) — ya **no hace falta
-Postgres**: esta rama no tiene base de datos propia. El catálogo y los pedidos
-viven en el sistema de pedidos de Brasa & Pan, que ya está desplegado en
-Vercel. LiveKit Cloud sigue siendo el mismo proyecto que usas en local.
+**Una sola pieza en Railway** (`agent-worker`). Ya **no hace falta Postgres**
+—esta rama no tiene base de datos propia— ni el servicio `web`, que se fue a
+Vercel.
 
-> Si vienes de la rama `pedidos` y ya tenías un servicio de Postgres en este
-> proyecto de Railway, bórralo **después** de comprobar que las llamadas
-> funcionan: ya no se usa, y sigue costando.
+> Si vienes de la rama `pedidos`, en ese proyecto de Railway te sobran **dos**
+> servicios: el `web` y el `Postgres`. Bórralos **después** de comprobar que
+> las llamadas funcionan; ya no se usan y siguen costando.
 
 **Por qué no se autohospeda LiveKit (el servidor de media) en Railway:**
 WebRTC necesita rango de puertos UDP para el audio; Railway solo expone
@@ -56,8 +73,12 @@ desactualizado cuando lo leas.
 
 Para mantenerlo barato en una demo (no un servicio 24/7 con tráfico real):
 
-- Las dos imágenes (`Dockerfile` del agente y `web/Dockerfile`) son
-  deliberadamente livianas (`python:3.14-slim`, sin dependencias de más).
+- **Pon `NUM_IDLE_PROCESSES=1`.** Es lo que más pesa en la factura: sin eso,
+  `livekit-agents` precalienta un subproceso por núcleo **del host** (~290 MB
+  cada uno) y los deja encendidos 24/7 sin atender a nadie. Ver el paso 2.3.
+- La página ya no está acá: se fue a Vercel, donde sale gratis.
+- La imagen del agente es deliberadamente liviana (`python:3.14-slim`, sin
+  dependencias de más).
 - El worker del agente casi no consume CPU en reposo (solo mantiene un
   WebSocket abierto hacia LiveKit); el gasto real ocurre durante una llamada.
 - Railway no duerme automáticamente los servicios "worker" (sin tráfico
@@ -134,12 +155,22 @@ No hay que crear ninguna base de datos. Lo que sí hace falta, del proyecto
 5. **No** generes un dominio público para este servicio: no recibe tráfico
    HTTP entrante, solo se conecta hacia afuera.
 
-## 3. Desplegar la interfaz web
+## 3. Desplegar la interfaz web (en Vercel, gratis)
 
-1. En el mismo proyecto: **New** → **GitHub Repo** → mismo repo, misma rama
-   `pedidos`, pero esta vez en **Settings** de ese servicio pon
-   **Root Directory = `web`**. Railway usará `web/Dockerfile`.
-2. Variables de este servicio:
+1. En Vercel: **Add New… → Project** → importa `demo-voice-agent` → rama
+   **`brasa-y-pan`**.
+2. En **Root Directory** pon **`web`**. Eso es todo el "build": Vercel detecta
+   la instancia de FastAPI llamada `app` en `web/main.py` y la convierte en una
+   función; los archivos de `web/static/` los sube al CDN por su cuenta (un
+   `app.mount()` con `StaticFiles` se promueve en el build).
+
+   > **El orden de las rutas importa.** `/api/token` y `/api/estado` están
+   > declarados **antes** del `app.mount("/")`, y así tiene que quedar: en
+   > Vercel, una ruta declarada antes del mount gana sobre los archivos del
+   > CDN. Si se movieran debajo, el CDN se las comería y devolverían el HTML
+   > de la página en vez del token.
+
+3. Variables de entorno del proyecto:
    ```
    LIVEKIT_URL=wss://tu-proyecto.livekit.cloud
    LIVEKIT_API_KEY=...
@@ -147,15 +178,26 @@ No hay que crear ninguna base de datos. Lo que sí hace falta, del proyecto
    DELIVERY_API_URL=https://<la-app-del-menu>.vercel.app
    BUSINESS_WHATSAPP_NUMBER=57...
    ```
-   Las dos últimas son para `GET /api/estado`: la página pregunta si el
-   sistema de pedidos está arriba **antes** de dejar llamar, y si no lo está
-   muestra el WhatsApp en vez de dejar entrar a una llamada que no puede
-   terminar en pedido. Este servicio **no** necesita `INTERNAL_SECRET`: solo
-   consulta `/api/health`, que es público.
-3. Nómbralo `web`, despliega, y en **Settings → Networking** genera un
-   dominio público (`Generate Domain`). Railway te da una URL tipo
-   `web-production-xxxx.up.railway.app` con HTTPS ya incluido — necesario
-   para que el navegador permita el micrófono.
+   Las dos últimas son para `GET /api/estado`: la página pregunta si el sistema
+   de pedidos está arriba **antes** de dejar llamar, y si no lo está muestra el
+   WhatsApp en vez de dejar entrar a una llamada que no puede terminar en
+   pedido. Este proyecto **no** necesita `INTERNAL_SECRET`: solo consulta
+   `/api/health`, que es público.
+
+4. Despliega. Vercel da HTTPS por defecto, que es obligatorio para que el
+   navegador permita el micrófono.
+
+5. Comprueba los dos endpoints antes de llamar:
+   ```bash
+   curl https://<tu-proyecto>.vercel.app/api/estado
+   # {"ok":true,"whatsapp":"57..."}
+   curl -s https://<tu-proyecto>.vercel.app/api/token | head -c 120
+   ```
+   Si `/api/estado` dice `ok:false`, revisa `DELIVERY_API_URL` antes de seguir:
+   con eso en falso el botón de llamar queda deshabilitado a propósito.
+
+> `web/Dockerfile` se queda en el repo para poder correrlo en un contenedor si
+> algún día hace falta, pero Vercel no lo usa (está en `web/.vercelignore`).
 
 ## 4. Probar
 
@@ -168,8 +210,32 @@ No hay que crear ninguna base de datos. Lo que sí hace falta, del proyecto
    con su badge 📞, con las opciones en el renglón y el total correcto. Eso es
    lo que hay que poder mostrar; que la llamada suene bien no basta.
 5. Si no conecta: revisa los logs de `agent-worker` (¿arrancó? ¿el catálogo
-   cargó, o hay un `[arranque] sin sistema de pedidos`?) y de `web` (¿el
-   `/api/token` devuelve 200? ¿`/api/estado` dice `ok:true`?), en ese orden.
+   cargó, o hay un `[arranque] sin sistema de pedidos`?) y los de la función de
+   Vercel (¿`/api/token` devuelve 200? ¿`/api/estado` dice `ok:true`?), en ese
+   orden.
+
+## Cuánto tarda en contestar, y por qué
+
+El worker loguea el arranque de cada llamada por tramos, con el prefijo
+`[arranque]`. Medido en local contra LiveKit Cloud real:
+
+```
+[arranque] catalogo               +0.8s   (HTTP al sistema de pedidos)
+[arranque] pipeline stt           +0.8s
+[arranque] sesion + vad           +0.8s
+[arranque] session.start          +5.0s   ← el grueso: unirse a la sala + BVC
+[arranque] audio de fondo         +5.4s
+```
+
+Del clic al "¡Hola!" son unos **6-7 segundos**, y la mayor parte se va en
+`session.start()`, que es entrar a la sala de LiveKit e inicializar la
+cancelación de ruido. No es algo que este repo controle, pero conviene saberlo
+antes de enseñar la demo: el plazo de 12 s de la página está puesto con ese
+margen en mente.
+
+Si al medir te sale mucho más (15 s o más), sospecha del sistema de pedidos: el
+tramo `catalogo` es el único que depende de la red, y contra un servidor de
+desarrollo sin compilar puede costar 2-3 segundos él solo.
 
 ## Si pide micrófono pero no se escucha nada (diagnóstico)
 

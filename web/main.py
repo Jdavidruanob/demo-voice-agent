@@ -113,7 +113,9 @@ async def _pedidos_arriba() -> bool:
     if not base:
         return False
     try:
-        async with httpx.AsyncClient(timeout=3.0) as cliente:
+        # 5 s y no 3: esto consulta el catálogo contra la base, y un falso
+        # "caído" le cierra la puerta a un cliente que sí podía pedir.
+        async with httpx.AsyncClient(timeout=5.0) as cliente:
             r = await cliente.get(f"{base}/api/health")
             return r.status_code == 200 and r.json().get("ok") is True
     except Exception:  # noqa: BLE001 - cualquier fallo es "no esta arriba"

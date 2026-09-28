@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 
 from dotenv import load_dotenv
 from livekit import agents, rtc
@@ -433,6 +434,15 @@ async def entrypoint(ctx: JobContext):
     #
     # Es tambien la primera comprobacion de que el sistema esta arriba. Si no
     # esta, no se arranca la llamada: se dice la verdad y se cuelga.
+    # Cronometro del arranque. El cliente ya dio clic y esta mirando el circulo:
+    # todo lo que pase antes del saludo es silencio para el. Se loguea por
+    # tramos para saber CUAL tramo es el que cuesta, igual que [latencia] hace
+    # con los turnos.
+    _t0 = time.perf_counter()
+
+    def _marca(paso: str) -> None:
+        logger.info("[arranque] %-22s +%.1fs", paso, time.perf_counter() - _t0)
+
     api = PedidosAPI()
     try:
         catalogo = Catalogo(await api.catalogo())
@@ -441,10 +451,12 @@ async def entrypoint(ctx: JobContext):
         await _despedir_sin_servicio(ctx, str(e))
         return
 
+    _marca("catalogo")
     ctx.add_shutdown_callback(api.aclose)
     menu_text = catalogo.prompt_block()
 
     stt_component, turn_detection, endpointing = _build_turn_pipeline()
+    _marca("pipeline stt")
 
     session = AgentSession[PedidoEnCurso](
         userdata=PedidoEnCurso(
@@ -483,6 +495,7 @@ async def entrypoint(ctx: JobContext):
         },
     )
 
+    _marca("sesion + vad")
     _registrar_metricas_de_turno(session)
 
     await session.start(
@@ -495,6 +508,8 @@ async def entrypoint(ctx: JobContext):
         ),
     )
 
+    _marca("session.start")
+
     # Pista de audio de fondo independiente de la del agente: BackgroundAudioPlayer
     # crea su propio AudioSource/LocalAudioTrack, publica en la sala y hace el loop
     # del wav sin bloquear el event loop (decodifica y resamplea via ffmpeg/av).
@@ -505,6 +520,7 @@ async def entrypoint(ctx: JobContext):
     )
     await background_audio.start(room=ctx.room, agent_session=session)
     ctx.add_shutdown_callback(background_audio.aclose)
+    _marca("audio de fondo")
 
     _capturar_telefono_sip(session, ctx.room)
 
@@ -512,6 +528,7 @@ async def entrypoint(ctx: JobContext):
     # el roundtrip de LLM que tendria generate_reply(). Es el primer
     # momento que escucha el comprador, asi que es el que mas rinde.
     await session.say(SALUDO)
+    _marca("SALUDO dicho")
 
 
 if __name__ == "__main__":

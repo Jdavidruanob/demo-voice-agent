@@ -162,8 +162,11 @@ uv run --with fastapi --with "uvicorn[standard]" --with livekit-api --with pytho
 ```
 
 Abre `http://localhost:8000`, toca el botón de llamar y permite el micrófono.
-Para desplegar esto (agente + web) en producción de la forma más barata
-posible, ver [`docs/DEPLOY_RAILWAY.md`](docs/DEPLOY_RAILWAY.md).
+
+En producción las dos piezas van en sitios distintos: **el worker del agente en
+Railway** (no puede ir a Vercel: se queda esperando despachos por WebSocket, no
+lo dispara un request) y **la página en Vercel**, donde sale gratis. Los pasos
+están en [`docs/DEPLOY_RAILWAY.md`](docs/DEPLOY_RAILWAY.md).
 
 ## Latencia
 

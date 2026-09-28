@@ -1,5 +1,7 @@
 fastapi>=0.115
-uvicorn[standard]>=0.32
+# Solo para correrlo en local: en Vercel el servidor ASGI lo pone la
+# plataforma. Sin los extras [standard] el bundle pesa ~30 MB menos.
+uvicorn>=0.32
 livekit-api~=1.2
 python-dotenv>=1.2.2
 # Para consultar /api/health del sistema de pedidos (GET /api/estado).
