@@ -114,7 +114,19 @@ No hay que crear ninguna base de datos. Lo que sí hace falta, del proyecto
    LLM_MODEL=openai/gpt-4.1-mini
    STT_MODEL=deepgram/flux-general-multi
    AVISO_LEGAL=false
+   NUM_IDLE_PROCESSES=1
    ```
+   **`NUM_IDLE_PROCESSES` no es opcional en Railway, es la factura.** El
+   default de `livekit-agents` es un subproceso caliente por núcleo, y dentro
+   de un contenedor sin cuota de CPU fijada —lo normal acá— cuenta los núcleos
+   del **host**, no los tuyos. Cada proceso pesa ~290 MB y está encendido 24/7
+   sin atender a nadie: en un host de 12 núcleos son 3.5 GB de RAM facturada
+   para que no pase nada.
+
+   Para comprobarlo en tus logs: al arrancar hay un par de líneas
+   `initializing process` / `process initialized` **por cada proceso caliente**.
+   Si ves ocho pares, estabas pagando ocho.
+
    `DELIVERY_API_URL` **sin barra al final** y sin el `/api` — el cliente
    arma las rutas por su cuenta.
 4. Nómbralo algo claro, ej. `agent-worker`, y despliega. En los logs deberías

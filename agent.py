@@ -314,7 +314,32 @@ class Assistant(Agent):
         )
 
 
-server = AgentServer()
+# Cuantos subprocesos mantiene el worker CALIENTES esperando una llamada.
+#
+# Esto es lo que decide la factura de un agente alojado por CPU/RAM, y el
+# default es una trampa dentro de un contenedor:
+#
+#   num_idle_processes (prod) = ceil(cpu_count())
+#
+# ...y ese `cpu_count()` lee `/sys/fs/cgroup/cpu.max`; si el contenedor no tiene
+# cuota de CPU fijada —lo normal en Railway, que da CPU por rafagas— cae a
+# `psutil.cpu_count()`, que es el numero de nucleos del **host**, no los que te
+# asignaron. En una maquina de 12 nucleos son 12 subprocesos.
+#
+# Cada uno pesa ~290 MB solo por importar este modulo (medido), y estan ahi
+# 24/7 sin atender a nadie: 12 x 290 MB = 3.5 GB de RAM facturada para que no
+# pase nada.
+#
+# Uno alcanza para una demo: la primera llamada entra al proceso caliente y
+# responde al instante, y una segunda simultanea arranca otro. Con 0 se ahorra
+# esa RAM pero la primera llamada paga el arranque en frio, y se oye justo en
+# el saludo — el momento que mas rinde.
+#
+# Para contarlos en los logs: hay un par de lineas `initializing process` /
+# `process initialized` por cada proceso caliente, al arrancar.
+PROCESOS_EN_ESPERA = int(os.getenv("NUM_IDLE_PROCESSES", "1"))
+
+server = AgentServer(num_idle_processes=PROCESOS_EN_ESPERA)
 
 
 def _registrar_metricas_de_turno(session: AgentSession) -> None:
